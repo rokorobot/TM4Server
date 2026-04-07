@@ -1,0 +1,2 @@
+# TM4Server - Core dependencies
+# No external packages are needed for the minimal bootstrap.

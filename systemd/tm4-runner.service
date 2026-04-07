@@ -1,0 +1,18 @@
+[Unit]
+Description=TM4 Minimal Runner
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/opt/tm4/app
+Environment=TM4_BASE_PATH=/var/lib/tm4
+Environment=TM4_POLL_INTERVAL_S=3
+ExecStart=/opt/tm4/venv/bin/python -m tm4server.worker
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/tm4/tm4-runner.log
+StandardError=append:/var/log/tm4/tm4-runner.log
+
+[Install]
+WantedBy=multi-user.target
