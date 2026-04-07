@@ -22,16 +22,16 @@ def main() -> int:
         print(f"ERROR: run_dir does not exist or is not a directory: {run_dir}", file=sys.stderr)
         return 2
 
-    # Use environment-aware fallbacks
+    # Use environment-aware fallbacks (VPS-first)
     tm4_core_repo_path = (
         args.tm4_core_repo
         or os.environ.get("TM4_CORE_PATH")
-        or "C:/Users/Robert/TM4"
+        or "/opt/tm4-core"
     )
     tm4server_repo_path = (
         args.tm4server_repo
         or os.environ.get("TM4SERVER_REPO_PATH")
-        or str(Path(__file__).resolve().parents[2])
+        or "/opt/tm4server"
     )
 
     extractor = RunSummaryExtractor(

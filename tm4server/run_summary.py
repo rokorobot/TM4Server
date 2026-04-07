@@ -89,13 +89,13 @@ def safe_iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
         return
 
 
-def git_rev_parse_short(repo_path: Optional[Path]) -> Optional[str]:
+def git_rev_parse(repo_path: Optional[Path]) -> Optional[str]:
     if repo_path is None or not repo_path.exists():
         return None
 
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_path), "rev-parse", "--short", "HEAD"],
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=True,
@@ -338,7 +338,7 @@ class RunSummaryExtractor:
             results.get("tm4_git_hash"),
             results_summary.get("tm4_version"),
             results_summary.get("tm4_git_hash"),
-            git_rev_parse_short(self.tm4_core_repo),
+            git_rev_parse(self.tm4_core_repo),
         )
 
     def _extract_tm4server_version(
@@ -360,7 +360,7 @@ class RunSummaryExtractor:
             results.get("tm4server_git_hash"),
             results_summary.get("tm4server_version"),
             results_summary.get("tm4server_git_hash"),
-            git_rev_parse_short(self.tm4server_repo),
+            git_rev_parse(self.tm4server_repo),
         )
 
     def _extract_event_log_stats(self) -> Dict[str, Any]:
@@ -422,7 +422,13 @@ class RunSummaryExtractor:
                 if candidate_ttc is not None:
                     ttc = candidate_ttc
 
-            if event_type in {"run_completed", "completed", "success", "subprocess_completed"}:
+            if event_type == "subprocess_completed":
+                return_code = coerce_int(event.get("return_code"))
+                if return_code == 0:
+                    terminal_status = "success"
+                elif return_code is not None:
+                    terminal_status = "failed"
+            elif event_type in {"run_completed", "completed", "success"}:
                 terminal_status = "success"
             elif event_type in {"run_failed", "failed", "error", "preflight_failed"}:
                 terminal_status = "failed"
