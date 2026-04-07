@@ -16,7 +16,8 @@ def ensure_dir(path: Path) -> None:
 def read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    # utf-8-sig handles files written by PowerShell (UTF-8 BOM) and plain UTF-8
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:

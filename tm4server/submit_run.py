@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import json
 from pathlib import Path
 
 from .config import QUEUED_DIR
@@ -11,6 +12,7 @@ def main() -> None:
     parser.add_argument("--exp-id", required=True)
     parser.add_argument("--task", default="demo_task")
     parser.add_argument("--model", default="demo-model")
+    parser.add_argument("--params-json", default="{}")
     args = parser.parse_args()
 
     ensure_dir(QUEUED_DIR)
@@ -20,7 +22,8 @@ def main() -> None:
         "task": args.task,
         "model": args.model,
         "submitted_at": utc_now_iso(),
-        "code_version": "bootstrap-v1",
+        "code_version": "tm4server-bootstrap",
+        "parameters": json.loads(args.params_json),
     }
 
     out = QUEUED_DIR / f"{args.exp_id}.json"

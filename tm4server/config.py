@@ -21,3 +21,13 @@ CURRENT_RUN_FILE = STATE_DIR / "current_run.json"
 
 APP_NAME = "tm4server"
 POLL_INTERVAL_S = int(os.getenv("TM4_POLL_INTERVAL_S", "3"))
+
+# TM4 Core Integration
+TM4_CORE_PATH = Path(os.getenv("TM4_CORE_PATH", r"C:\Users\Robert\TM4"))
+TM4_AUTONOMY_SCRIPT = Path(
+    os.getenv("TM4_AUTONOMY_SCRIPT", str(TM4_CORE_PATH / "mvp" / "scripts" / "run_autonomy_loop.py"))
+)
+TM4_PYTHON_BIN = os.getenv("TM4_PYTHON_BIN", "python")
+
+# Flexible CLI arguments for the autonomy script
+TM4_AUTONOMY_EXTRA_ARGS = []  # Extend this if required arguments are found later
