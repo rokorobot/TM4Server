@@ -13,7 +13,7 @@ from .config import (
     CURRENT_RUN_FILE,
 )
 from .utils import ensure_dir, read_json, write_json, utc_now_iso, append_line
-from .runtime import run_experiment
+from .runtime import run_experiment, _emit_event
 
 
 def init_dirs() -> None:
@@ -73,14 +73,9 @@ def process_one() -> bool:
         # Executes experiment (writes results.json internally)
         results = run_experiment(run_dir, manifest)
 
-        # Final status.json
-        write_json(run_dir / "status.json", {
-            "experiment_id": exp_id,
-            "status": "completed",
-            "ts_utc": utc_now_iso(),
-        })
-
+        # runtime.py already writes status.json and results.json
         shutil.move(str(running_manifest), str(COMPLETED_DIR / running_manifest.name))
+        _emit_event(run_dir / "event_log.jsonl", "manifest_moved_completed", destination="completed")
 
         write_json(STATUS_FILE, {
             "status": "idle",
@@ -94,14 +89,19 @@ def process_one() -> bool:
         append_line(stdout_log, f"[{utc_now_iso()}] ERROR: {e}")
         append_line(stdout_log, traceback.format_exc())
 
-        write_json(run_dir / "status.json", {
-            "experiment_id": exp_id,
-            "status": "failed",
-            "ts_utc": utc_now_iso(),
-            "error": str(e),
-        })
+        # Only write status.json here if runtime.py failed before writing its own
+        status_path = run_dir / "status.json"
+        if not status_path.exists():
+            write_json(status_path, {
+                "experiment_id": exp_id,
+                "status": "failed",
+                "preflight_status": "unknown",
+                "error": str(e),
+                "ts_utc": utc_now_iso(),
+            })
 
         shutil.move(str(running_manifest), str(FAILED_DIR / running_manifest.name))
+        _emit_event(run_dir / "event_log.jsonl", "manifest_moved_failed", error=str(e))
 
         write_json(STATUS_FILE, {
             "status": "idle",

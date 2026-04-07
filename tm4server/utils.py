@@ -22,7 +22,9 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
     ensure_dir(path.parent)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Explicit UTF-8 without BOM — safe on all platforms including Windows
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    path.write_text(content, encoding="utf-8")
 
 
 def append_line(path: Path, line: str) -> None:
