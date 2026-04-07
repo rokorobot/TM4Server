@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -21,17 +22,25 @@ def main() -> int:
         print(f"ERROR: run_dir does not exist or is not a directory: {run_dir}", file=sys.stderr)
         return 2
 
-    # Use default relative paths if not provided
-    tm4_core_repo = Path(args.tm4_core_repo) if args.tm4_core_repo else Path("C:/Users/Robert/TM4")
-    tm4server_repo = Path(args.tm4server_repo) if args.tm4server_repo else Path(__file__).parent.parent.parent
+    # Use environment-aware fallbacks
+    tm4_core_repo_path = (
+        args.tm4_core_repo
+        or os.environ.get("TM4_CORE_PATH")
+        or "C:/Users/Robert/TM4"
+    )
+    tm4server_repo_path = (
+        args.tm4server_repo
+        or os.environ.get("TM4SERVER_REPO_PATH")
+        or str(Path(__file__).resolve().parents[2])
+    )
 
     extractor = RunSummaryExtractor(
         run_dir=run_dir,
-        tm4_core_repo=tm4_core_repo,
-        tm4server_repo=tm4server_repo,
+        tm4_core_repo=Path(tm4_core_repo_path),
+        tm4server_repo=Path(tm4server_repo_path),
     )
     out_path = extractor.write(filename=args.output)
-    print(str(out_path))
+    print(str(out_path).strip())
     return 0
 
 
