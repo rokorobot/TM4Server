@@ -7,27 +7,30 @@ and capture of logs/results in the TM4Server run directory.
 """
 
 from __future__ import annotations
-from pathlib import Path
-from typing import Any
+
+import hashlib
 import json
 import os
 import subprocess
-import hashlib
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
-from .utils import utc_now_iso, write_json, append_line
+from .aggregate_runs import RunAggregator
 from .config import (
+    RUNS_DIR,
+    TM4_AUTO_PUSH_REPORTS,
+    TM4_AUTONOMY_EXTRA_ARGS,
     TM4_AUTONOMY_SCRIPT,
     TM4_CORE_PATH,
-    TM4_PYTHON_BIN,
-    TM4_AUTONOMY_EXTRA_ARGS,
-    TM4_AUTO_PUSH_REPORTS,
     TM4_DOCS_ROOT,
+    TM4_PYTHON_BIN,
 )
-from .run_summary import RunSummaryExtractor
 from .experiment_report import ExperimentReportGenerator
 from .git_sync import sync_report_to_git
+from .run_summary import RunSummaryExtractor
+from .utils import append_line, utc_now_iso, write_json
 
 
 def _safe_git_hash(repo_path: Path) -> str | None:
@@ -217,6 +220,9 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"TM4 subprocess failed with exit code {proc.returncode}")
 
     finally:
+        # --- BEST EFFORT POST-RUN ORCHESTRATION ---
+        
+        # A. Run Summary Extraction
         summary_path = None
         try:
             summary_path = RunSummaryExtractor(
@@ -230,15 +236,16 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             append_line(stderr_log, f"[{utc_now_iso()}] RUN_SUMMARY ERROR: {exc}")
             _emit_event(event_log, "run_summary_failed", error=str(exc))
 
+        # B. Experiment Report Generation
+        report_path = None
         if summary_path:
-            report_path = None
             try:
                 report_path = ExperimentReportGenerator(
                     summary_path=summary_path,
                     docs_root=TM4_DOCS_ROOT,
                     deployment_path="/opt/tm4server",
-                    tm4_core_path="/opt/tm4-core",
-                    runtime_root="/var/lib/tm4",
+                    tm4_core_path=str(TM4_CORE_PATH),
+                    runtime_root=str(RUNS_DIR.parent),
                 ).write()
                 append_line(stdout_log, f"[{utc_now_iso()}] Wrote experiment report: {report_path}")
                 _emit_event(event_log, "experiment_report_written", path=str(report_path))
@@ -246,57 +253,19 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 append_line(stderr_log, f"[{utc_now_iso()}] EXPERIMENT_REPORT ERROR: {exc}")
                 _emit_event(event_log, "experiment_report_failed", error=str(exc))
 
-            if report_path and TM4_AUTO_PUSH_REPORTS:
-                try:
-                    git_result = sync_report_to_git(
-                        repo_path=Path(__file__).parent.parent,
-                        report_path=report_path,
-                        exp_id=exp_id,
-                    )
-                    if git_result.get("ok"):
-                        append_line(
-                            stdout_log,
-                            f"[{utc_now_iso()}] GIT_SYNC OK: {git_result.get('message')}"
-                        )
-                        _emit_event(
-                            event_log,
-                            "git_sync_completed",
-                            ok=True,
-                            stage=str(git_result.get("stage")),
-                            message=str(git_result.get("message")),
-                        )
-                    else:
-                        append_line(
-                            stderr_log,
-                            f"[{utc_now_iso()}] GIT_SYNC WARN: {git_result.get('message')} | "
-                            f"stage={git_result.get('stage')} | stderr={git_result.get('stderr', '')}"
-                        )
-                        _emit_event(
-                            event_log,
-                            "git_sync_completed",
-                            ok=False,
-                            stage=str(git_result.get("stage")),
-                            message=str(git_result.get("message")),
-                        )
-                except Exception as exc:
-                    append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC ERROR: {exc}")
-                    _emit_event(event_log, "git_sync_failed", error=str(exc))
-            elif report_path:
-                append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC SKIPPED: TM4_AUTO_PUSH_REPORTS disabled")
-                _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled")
-
-        # 10. Non-blocking aggregation trigger
+        # C. Global Aggregation Refresh (includes results.csv / results.json)
+        ledger_paths: list[Path] = []
         try:
-            from .aggregate_runs import RunAggregator
-            from .config import RUNS_DIR
-
-            # Aggregate all runs in the canonical runs directory
+            output_csv = TM4_DOCS_ROOT / "results.csv"
+            output_json = TM4_DOCS_ROOT / "results.json"
+            
             agg_result = RunAggregator(
                 runs_root=RUNS_DIR,
-                output_csv=TM4_DOCS_ROOT / "results.csv",
-                output_json=TM4_DOCS_ROOT / "results.json",
+                output_csv=output_csv,
+                output_json=output_json,
             ).aggregate()
-
+            
+            ledger_paths = [output_csv, output_json]
             append_line(
                 stdout_log,
                 f"[{utc_now_iso()}] AGGREGATE_UPDATED: {agg_result.rows_written} runs indexed"
@@ -310,3 +279,32 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             append_line(stderr_log, f"[{utc_now_iso()}] AGGREGATE_ERROR: {exc}")
             _emit_event(event_log, "aggregate_failed", error=str(exc))
+
+        # D. Git Synchronization (Report + Ledger)
+        if TM4_AUTO_PUSH_REPORTS:
+            sync_targets = []
+            if report_path:
+                sync_targets.append(report_path)
+            sync_targets.extend(ledger_paths)
+            
+            if sync_targets:
+                try:
+                    success = sync_report_to_git(
+                        repo_path=Path(__file__).parent.parent,
+                        file_paths=sync_targets,
+                        commit_msg=f"Experiment update: {exp_id}",
+                        auto_push=True
+                    )
+                    
+                    if success:
+                        append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC OK: {len(sync_targets)} artifacts synchronized")
+                        _emit_event(event_log, "git_sync_completed", ok=True, count=len(sync_targets))
+                    else:
+                        append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC FAILED: Check git logs for details")
+                        _emit_event(event_log, "git_sync_completed", ok=False)
+                except Exception as exc:
+                    append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC ERROR: {exc}")
+                    _emit_event(event_log, "git_sync_failed", error=str(exc))
+        elif report_path:
+            append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC SKIPPED: TM4_AUTO_PUSH_REPORTS disabled")
+            _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -21,125 +22,64 @@ def _run_git(
 
 
 def _has_changes(repo_path: Path, file_path: Path) -> bool:
-    rel_path = str(file_path.relative_to(repo_path))
-    result = _run_git(repo_path, ["status", "--porcelain", "--", rel_path], timeout=10)
-    return result.returncode == 0 and bool(result.stdout.strip())
+    try:
+        rel_path = str(file_path.relative_to(repo_path))
+        result = _run_git(repo_path, ["status", "--porcelain", "--", rel_path], timeout=10)
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
 
 
 def sync_report_to_git(
     repo_path: Path,
-    report_path: Path,
-    exp_id: str,
-    branch: Optional[str] = None,
-) -> dict[str, object]:
+    file_paths: list[Path],
+    commit_msg: Optional[str] = None,
+    auto_push: bool = False,
+) -> bool:
     """
-    Best-effort Git sync for a generated experiment report.
-
-    Safety properties:
-    - never raises
-    - only stages the target report file
-    - skips commit if file has no changes
-    - push is attempted only after a successful commit
-    - all failures are returned as structured status
+    Stages and commits a set of files to the repository.
+    Optionally pushes to the configured remote.
     """
-    try:
-        repo_path = repo_path.resolve()
-        report_path = report_path.resolve()
+    if not repo_path.exists():
+        return False
 
-        if not repo_path.exists() or not repo_path.is_dir():
-            return {
-                "ok": False,
-                "stage": "precheck",
-                "message": f"Repository path does not exist: {repo_path}",
-            }
-
-        if not report_path.exists() or not report_path.is_file():
-            return {
-                "ok": False,
-                "stage": "precheck",
-                "message": f"Report path does not exist: {report_path}",
-            }
-
+    # 1. Filter only files that are actually inside the repo and exist
+    target_files = []
+    for fp in file_paths:
         try:
-            report_path.relative_to(repo_path)
-        except ValueError:
-            return {
-                "ok": False,
-                "stage": "precheck",
-                "message": f"Report path is not inside repository: {report_path}",
-            }
+            if fp.exists() and fp.resolve().is_relative_to(repo_path.resolve()):
+                target_files.append(fp)
+        except (ValueError, OSError):
+            continue
 
-        git_dir_check = _run_git(repo_path, ["rev-parse", "--is-inside-work-tree"], timeout=10)
-        if git_dir_check.returncode != 0 or git_dir_check.stdout.strip() != "true":
-            return {
-                "ok": False,
-                "stage": "precheck",
-                "message": f"Not a Git repository: {repo_path}",
-                "stderr": git_dir_check.stderr.strip(),
-            }
+    if not target_files:
+        return False
 
-        if not _has_changes(repo_path, report_path):
-            return {
-                "ok": True,
-                "stage": "noop",
-                "message": "No report changes to commit",
-            }
+    # 2. Check if any target file has changes
+    changed = False
+    for fp in target_files:
+        if _has_changes(repo_path, fp):
+            changed = True
+            break
 
-        rel_report = str(report_path.relative_to(repo_path))
+    if not changed:
+        return True  # No changes to sync, report success
 
-        add_result = _run_git(repo_path, ["add", "--", rel_report], timeout=15)
-        if add_result.returncode != 0:
-            return {
-                "ok": False,
-                "stage": "add",
-                "message": "git add failed",
-                "stderr": add_result.stderr.strip(),
-            }
+    # 3. Stage files
+    rel_paths = [str(fp.absolute().relative_to(repo_path.absolute())) for fp in target_files]
+    res_add = _run_git(repo_path, ["add", "--", *rel_paths])
+    if res_add.returncode != 0:
+        return False
 
-        commit_message = f"Add experiment report {exp_id}"
-        commit_result = _run_git(repo_path, ["commit", "-m", commit_message], timeout=20)
+    # 4. Commit
+    msg = commit_msg or f"Automated artifact sync: {datetime.now().isoformat()}"
+    res_commit = _run_git(repo_path, ["commit", "-m", msg])
+    if res_commit.returncode != 0:
+        return False
 
-        if commit_result.returncode != 0:
-            combined = f"{commit_result.stdout}\n{commit_result.stderr}".strip()
-            if "nothing to commit" in combined.lower():
-                return {
-                    "ok": True,
-                    "stage": "noop",
-                    "message": "Nothing to commit after staging",
-                }
-            return {
-                "ok": False,
-                "stage": "commit",
-                "message": "git commit failed",
-                "stderr": commit_result.stderr.strip(),
-                "stdout": commit_result.stdout.strip(),
-            }
+    # 5. Push (optional)
+    if auto_push:
+        res_push = _run_git(repo_path, ["push"])
+        return res_push.returncode == 0
 
-        push_args = ["push"]
-        if branch:
-            push_args.extend(["origin", branch])
-
-        push_result = _run_git(repo_path, push_args, timeout=45)
-        if push_result.returncode != 0:
-            return {
-                "ok": False,
-                "stage": "push",
-                "message": "git push failed",
-                "stderr": push_result.stderr.strip(),
-                "stdout": push_result.stdout.strip(),
-            }
-
-        return {
-            "ok": True,
-            "stage": "push",
-            "message": "Report committed and pushed",
-            "commit_message": commit_message,
-            "report_path": str(report_path),
-        }
-
-    except Exception as exc:
-        return {
-            "ok": False,
-            "stage": "exception",
-            "message": f"Unexpected git sync error: {exc}",
-        }
+    return True
