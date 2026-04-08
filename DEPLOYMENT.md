@@ -244,6 +244,6 @@ sudo ufw enable
 
 ## 🧠 Operator Notes (Important for TM4 Evolution)
 
-- This setup mirrors your local architecture → no drift between dev and server.
 - State + logs are externally visible and auditable (critical for governance layer).
 - You now have a stable base for multi-agent arenas + batch experiments.
+- **Git Sync Note**: Automated report pushing requires `TM4_DOCS_ROOT` to resolve inside the `TM4Server` Git repository.
