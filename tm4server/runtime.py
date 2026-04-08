@@ -284,3 +284,29 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             elif report_path:
                 append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC SKIPPED: TM4_AUTO_PUSH_REPORTS disabled")
                 _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled")
+
+        # 10. Non-blocking aggregation trigger
+        try:
+            from .aggregate_runs import RunAggregator
+            from .config import RUNS_DIR
+
+            # Aggregate all runs in the canonical runs directory
+            agg_result = RunAggregator(
+                runs_root=RUNS_DIR,
+                output_csv=TM4_DOCS_ROOT / "results.csv",
+                output_json=TM4_DOCS_ROOT / "results.json",
+            ).aggregate()
+
+            append_line(
+                stdout_log,
+                f"[{utc_now_iso()}] AGGREGATE_UPDATED: {agg_result.rows_written} runs indexed"
+            )
+            _emit_event(
+                event_log,
+                "aggregate_updated",
+                rows_written=agg_result.rows_written,
+                failed_files=agg_result.failed_files
+            )
+        except Exception as exc:
+            append_line(stderr_log, f"[{utc_now_iso()}] AGGREGATE_ERROR: {exc}")
+            _emit_event(event_log, "aggregate_failed", error=str(exc))
