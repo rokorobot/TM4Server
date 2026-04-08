@@ -23,6 +23,7 @@ from .config import (
     TM4_PYTHON_BIN,
     TM4_AUTONOMY_EXTRA_ARGS,
     TM4_AUTO_PUSH_REPORTS,
+    TM4_DOCS_ROOT,
 )
 from .run_summary import RunSummaryExtractor
 from .experiment_report import ExperimentReportGenerator
@@ -216,6 +217,7 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"TM4 subprocess failed with exit code {proc.returncode}")
 
     finally:
+        summary_path = None
         try:
             summary_path = RunSummaryExtractor(
                 run_dir=run_dir,
@@ -227,62 +229,58 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             append_line(stderr_log, f"[{utc_now_iso()}] RUN_SUMMARY ERROR: {exc}")
             _emit_event(event_log, "run_summary_failed", error=str(exc))
-            # Critical enough to stop reporting chain
-            return
 
-        try:
-            # We use VPS-style paths in the report itself for canonical documentation,
-            # but we use local paths for the ACTUAL file write during development.
-            report_path = ExperimentReportGenerator(
-                summary_path=summary_path,
-                docs_root=Path(__file__).parent.parent / "docs" / "experiments",
-                deployment_path="/opt/tm4server",
-                tm4_core_path="/opt/tm4-core",
-                runtime_root="/var/lib/tm4",
-            ).write()
-            append_line(stdout_log, f"[{utc_now_iso()}] Wrote experiment report: {report_path}")
-            _emit_event(event_log, "experiment_report_written", path=str(report_path))
-        except Exception as exc:
-            append_line(stderr_log, f"[{utc_now_iso()}] EXPERIMENT_REPORT ERROR: {exc}")
-            _emit_event(event_log, "experiment_report_failed", error=str(exc))
-            return
-
-        # 3. Optional Git Sync (Production Only)
-        if TM4_AUTO_PUSH_REPORTS:
+        if summary_path:
+            report_path = None
             try:
-                git_result = sync_report_to_git(
-                    repo_path=Path(__file__).parent.parent,
-                    report_path=report_path,
-                    exp_id=exp_id,
-                )
-                if git_result.get("ok"):
-                    append_line(
-                        stdout_log,
-                        f"[{utc_now_iso()}] GIT_SYNC OK: {git_result.get('message')}"
-                    )
-                    _emit_event(
-                        event_log,
-                        "git_sync_completed",
-                        ok=True,
-                        stage=str(git_result.get("stage")),
-                        message=str(git_result.get("message")),
-                    )
-                else:
-                    append_line(
-                        stderr_log,
-                        f"[{utc_now_iso()}] GIT_SYNC WARN: {git_result.get('message')} | "
-                        f"stage={git_result.get('stage')} | stderr={git_result.get('stderr', '')}"
-                    )
-                    _emit_event(
-                        event_log,
-                        "git_sync_completed",
-                        ok=False,
-                        stage=str(git_result.get("stage")),
-                        message=str(git_result.get("message")),
-                    )
+                report_path = ExperimentReportGenerator(
+                    summary_path=summary_path,
+                    docs_root=TM4_DOCS_ROOT,
+                    deployment_path="/opt/tm4server",
+                    tm4_core_path="/opt/tm4-core",
+                    runtime_root="/var/lib/tm4",
+                ).write()
+                append_line(stdout_log, f"[{utc_now_iso()}] Wrote experiment report: {report_path}")
+                _emit_event(event_log, "experiment_report_written", path=str(report_path))
             except Exception as exc:
-                append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC ERROR: {exc}")
-                _emit_event(event_log, "git_sync_failed", error=str(exc))
-        else:
-            append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC SKIPPED: TM4_AUTO_PUSH_REPORTS disabled")
-            _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled")
+                append_line(stderr_log, f"[{utc_now_iso()}] EXPERIMENT_REPORT ERROR: {exc}")
+                _emit_event(event_log, "experiment_report_failed", error=str(exc))
+
+            if report_path and TM4_AUTO_PUSH_REPORTS:
+                try:
+                    git_result = sync_report_to_git(
+                        repo_path=Path(__file__).parent.parent,
+                        report_path=report_path,
+                        exp_id=exp_id,
+                    )
+                    if git_result.get("ok"):
+                        append_line(
+                            stdout_log,
+                            f"[{utc_now_iso()}] GIT_SYNC OK: {git_result.get('message')}"
+                        )
+                        _emit_event(
+                            event_log,
+                            "git_sync_completed",
+                            ok=True,
+                            stage=str(git_result.get("stage")),
+                            message=str(git_result.get("message")),
+                        )
+                    else:
+                        append_line(
+                            stderr_log,
+                            f"[{utc_now_iso()}] GIT_SYNC WARN: {git_result.get('message')} | "
+                            f"stage={git_result.get('stage')} | stderr={git_result.get('stderr', '')}"
+                        )
+                        _emit_event(
+                            event_log,
+                            "git_sync_completed",
+                            ok=False,
+                            stage=str(git_result.get("stage")),
+                            message=str(git_result.get("message")),
+                        )
+                except Exception as exc:
+                    append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC ERROR: {exc}")
+                    _emit_event(event_log, "git_sync_failed", error=str(exc))
+            elif report_path:
+                append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC SKIPPED: TM4_AUTO_PUSH_REPORTS disabled")
+                _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled")

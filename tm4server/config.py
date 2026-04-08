@@ -1,9 +1,9 @@
 from pathlib import Path
 import os
 
-# TM4_BASE_PATH defaults to ./local_runtime for local development.
-# On the server, set this to /var/lib/tm4 via environment variable.
-TM4_BASE = Path(os.getenv("TM4_BASE_PATH", "./local_runtime"))
+# TM4_BASE_PATH defaults to /var/lib/tm4 for VPS deployment.
+# For local development, override this in your .env file (e.g., ./local_runtime).
+TM4_BASE = Path(os.getenv("TM4_BASE_PATH", "/var/lib/tm4"))
 
 QUEUE_DIR = TM4_BASE / "queue"
 RUNS_DIR = TM4_BASE / "runs"
@@ -22,8 +22,8 @@ CURRENT_RUN_FILE = STATE_DIR / "current_run.json"
 APP_NAME = "tm4server"
 POLL_INTERVAL_S = int(os.getenv("TM4_POLL_INTERVAL_S", "3"))
 
-# TM4 Core Integration
-TM4_CORE_PATH = Path(os.getenv("TM4_CORE_PATH", r"C:\Users\Robert\TM4"))
+# TM4 Core Integration - VPS Defaults
+TM4_CORE_PATH = Path(os.getenv("TM4_CORE_PATH", "/opt/tm4-core"))
 TM4_AUTONOMY_SCRIPT = Path(
     os.getenv("TM4_AUTONOMY_SCRIPT", str(TM4_CORE_PATH / "mvp" / "scripts" / "run_autonomy_loop.py"))
 )
@@ -31,6 +31,10 @@ TM4_PYTHON_BIN = os.getenv("TM4_PYTHON_BIN", "python")
 
 # Flexible CLI arguments for the autonomy script
 TM4_AUTONOMY_EXTRA_ARGS = []  # Extend this if required arguments are found later
+
+# Reporting Configuration
+TM4SERVER_REPO_ROOT = Path(__file__).parent.parent
+TM4_DOCS_ROOT = Path(os.getenv("TM4_DOCS_ROOT", str(TM4SERVER_REPO_ROOT / "docs" / "experiments")))
 
 # Git Sync Configuration
 TM4_AUTO_PUSH_REPORTS = os.getenv("TM4_AUTO_PUSH_REPORTS", "0") == "1"
