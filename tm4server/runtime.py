@@ -28,7 +28,7 @@ from .config import (
     TM4_PYTHON_BIN,
 )
 from .experiment_report import ExperimentReportGenerator
-from .git_sync import sync_report_to_git
+from .git_sync import sync_artifacts_to_git
 from .run_summary import RunSummaryExtractor
 from .utils import append_line, utc_now_iso, write_json
 
@@ -289,7 +289,7 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         if TM4_AUTO_PUSH_REPORTS:
             if sync_targets:
                 try:
-                    git_res = sync_report_to_git(
+                    git_res = sync_artifacts_to_git(
                         repo_path=Path(__file__).parent.parent,
                         file_paths=sync_targets,
                         commit_msg=f"Experiment update: {exp_id}",

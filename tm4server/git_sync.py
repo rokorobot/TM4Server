@@ -23,15 +23,16 @@ def _run_git(
 
 def _has_changes(repo_path: Path, file_path: Path) -> bool:
     try:
-        # Use str(rel_path) for git status check
-        rel_path = file_path.absolute().relative_to(repo_path.absolute())
-        result = _run_git(repo_path, ["status", "--porcelain", "--", str(rel_path)], timeout=10)
+        repo_root = repo_path.resolve()
+        candidate = file_path.resolve()
+        rel_path = candidate.relative_to(repo_root)
+        result = _run_git(repo_root, ["status", "--porcelain", "--", str(rel_path)], timeout=10)
         return result.returncode == 0 and bool(result.stdout.strip())
     except Exception:
         return False
 
 
-def sync_report_to_git(
+def sync_artifacts_to_git(
     repo_path: Path,
     file_paths: List[Path],
     commit_msg: Optional[str] = None,
@@ -41,15 +42,17 @@ def sync_report_to_git(
     Stages and commits a set of files to the repository.
     Returns a detailed status dictionary.
     """
-    if not repo_path.exists():
-        return {"ok": False, "stage": "precheck", "message": f"Repo not found: {repo_path}"}
+    repo_root = repo_path.resolve()
+    if not repo_root.exists():
+        return {"ok": False, "stage": "precheck", "message": f"Repo not found: {repo_root}"}
 
-    # 1. Filter only files that are actually inside the repo and exist
+    # 1. Filter only files that are actually inside the repo and exist (using resolve for symlink safety)
     target_files: List[Path] = []
     for fp in file_paths:
         try:
-            if fp.exists() and fp.absolute().is_relative_to(repo_path.absolute()):
-                target_files.append(fp)
+            candidate = fp.resolve()
+            if candidate.exists() and candidate.is_relative_to(repo_root):
+                target_files.append(candidate)
         except (ValueError, OSError):
             continue
 
@@ -59,7 +62,7 @@ def sync_report_to_git(
     # 2. Check if any target file has changes
     changed = False
     for fp in target_files:
-        if _has_changes(repo_path, fp):
+        if _has_changes(repo_root, fp):
             changed = True
             break
 
@@ -67,8 +70,8 @@ def sync_report_to_git(
         return {"ok": True, "stage": "check", "changed": False, "message": "No changes detected in artifacts."}
 
     # 3. Stage files
-    rel_paths = [str(fp.absolute().relative_to(repo_path.absolute())) for fp in target_files]
-    res_add = _run_git(repo_path, ["add", "--", *rel_paths])
+    rel_paths = [str(fp.relative_to(repo_root)) for fp in target_files]
+    res_add = _run_git(repo_root, ["add", "--", *rel_paths])
     if res_add.returncode != 0:
         return {
             "ok": False,
@@ -79,7 +82,7 @@ def sync_report_to_git(
 
     # 4. Commit
     msg = commit_msg or f"Automated artifact sync: {datetime.now().isoformat()}"
-    res_commit = _run_git(repo_path, ["commit", "-m", msg])
+    res_commit = _run_git(repo_root, ["commit", "-m", msg])
     if res_commit.returncode != 0:
         return {
             "ok": False,
@@ -90,7 +93,7 @@ def sync_report_to_git(
 
     # 5. Push (optional)
     if auto_push:
-        res_push = _run_git(repo_path, ["push"])
+        res_push = _run_git(repo_root, ["push"])
         if res_push.returncode != 0:
             return {
                 "ok": False,
