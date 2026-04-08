@@ -281,30 +281,35 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             _emit_event(event_log, "aggregate_failed", error=str(exc))
 
         # D. Git Synchronization (Report + Ledger)
+        sync_targets = []
+        if report_path:
+            sync_targets.append(report_path)
+        sync_targets.extend([p for p in ledger_paths if p.exists()])
+
         if TM4_AUTO_PUSH_REPORTS:
-            sync_targets = []
-            if report_path:
-                sync_targets.append(report_path)
-            sync_targets.extend(ledger_paths)
-            
             if sync_targets:
                 try:
-                    success = sync_report_to_git(
+                    git_res = sync_report_to_git(
                         repo_path=Path(__file__).parent.parent,
                         file_paths=sync_targets,
                         commit_msg=f"Experiment update: {exp_id}",
                         auto_push=True
                     )
                     
-                    if success:
-                        append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC OK: {len(sync_targets)} artifacts synchronized")
-                        _emit_event(event_log, "git_sync_completed", ok=True, count=len(sync_targets))
+                    if git_res["ok"]:
+                        status_type = "OK" if git_res.get("changed") else "NO_CHANGE"
+                        append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC {status_type}: {git_res['message']}")
+                        _emit_event(event_log, "git_sync_completed", **git_res)
                     else:
-                        append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC FAILED: Check git logs for details")
-                        _emit_event(event_log, "git_sync_completed", ok=False)
+                        append_line(
+                            stderr_log, 
+                            f"[{utc_now_iso()}] GIT_SYNC FAILED: {git_res['message']} | "
+                            f"stage={git_res['stage']} | stderr={git_res.get('stderr', '')}"
+                        )
+                        _emit_event(event_log, "git_sync_completed", **git_res)
                 except Exception as exc:
                     append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC ERROR: {exc}")
                     _emit_event(event_log, "git_sync_failed", error=str(exc))
-        elif report_path:
+        else:
             append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC SKIPPED: TM4_AUTO_PUSH_REPORTS disabled")
-            _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled")
+            _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled", artifact_count=len(sync_targets))
