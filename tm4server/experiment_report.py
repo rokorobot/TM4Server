@@ -155,7 +155,7 @@ Execution record for TM4Server run `{self.exp_id}`.
 - Summary Generated At: {fmt(provenance.get("summary_generated_at"))}
 - Summary Generator: {fmt(provenance.get("summary_generator"))}
 - Summary Generator Version: {fmt(provenance.get("summary_generator_version"))}
-- Report Source: {code_path(self.summary_path)}
+- Report Source: `{self.summary_path.name}`
 - Report Generator Version: {REPORT_GENERATOR_VERSION}
 
 ## Warnings

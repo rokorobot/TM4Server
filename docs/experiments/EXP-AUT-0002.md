@@ -50,7 +50,7 @@ Execution record for TM4Server run `EXP-AUT-0002`.
 - Summary Generated At: 2026-04-07T23:31:50Z
 - Summary Generator: tm4server.run_summary
 - Summary Generator Version: 1.0
-- Report Source: `C:\Users\Robert\TM4Server\local_runtime\runs\EXP-AUT-0002\run_summary.json`
+- Report Source: `run_summary.json`
 - Report Generator Version: 1.0
 
 ## Warnings
