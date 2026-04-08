@@ -28,7 +28,7 @@ The ledger is regenerated after every run in the documentation root:
 Each row in the ledger represents a snapshot of a completed experiment. Key dimensions include:
 
 ### 1. Identity & Context
-- `experiment_id`: Unique identifier (e.g., `EXP-AUT-0003`).
+- `exp_id`: Unique identifier (e.g., `EXP-AUT-0003`).
 - `instance_id`: Target machine or environment ID.
 - `execution_mode`: Context of the run (e.g., `vps`, `local`).
 
@@ -46,6 +46,7 @@ Each row in the ledger represents a snapshot of a completed experiment. Key dime
 - `fitness_max` / `fitness_mean`: Core quality metrics.
 - `ttc`: Time-to-Convergence (if applicable).
 - `violations`: Safety or constraint violation count.
+- `commits`: Number of Git commits captured.
 
 ---
 

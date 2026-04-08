@@ -47,7 +47,7 @@ Structured format including:
 ## Schema
 
 Key fields extracted:
-- `experiment_id`
+- `exp_id`
 - `status`
 - `validation_status`
 - `duration_s`
@@ -60,7 +60,7 @@ Key fields extracted:
 - `ttc` (Time to Convergence)
 - `violations`
 - `checkpoints`
-- `commits_count`
+- `commits`
 
 ---
 
