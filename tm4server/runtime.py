@@ -17,7 +17,16 @@ import time
 from datetime import datetime, timezone
 
 from .utils import utc_now_iso, write_json, append_line
-from .config import TM4_AUTONOMY_SCRIPT, TM4_CORE_PATH, TM4_PYTHON_BIN, TM4_AUTONOMY_EXTRA_ARGS
+from .config import (
+    TM4_AUTONOMY_SCRIPT,
+    TM4_CORE_PATH,
+    TM4_PYTHON_BIN,
+    TM4_AUTONOMY_EXTRA_ARGS,
+    TM4_AUTO_PUSH_REPORTS,
+)
+from .run_summary import RunSummaryExtractor
+from .experiment_report import ExperimentReportGenerator
+from .git_sync import sync_report_to_git
 
 
 def _safe_git_hash(repo_path: Path) -> str | None:
@@ -60,147 +69,220 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
     _emit_event(event_log, "job_picked", experiment_id=exp_id)
 
-    # 1. Preflight Validation
-    errors = []
-    if not TM4_CORE_PATH.exists():
-        errors.append(f"TM4_CORE_PATH does not exist: {TM4_CORE_PATH}")
-    if not TM4_AUTONOMY_SCRIPT.exists():
-        errors.append(f"TM4_AUTONOMY_SCRIPT does not exist: {TM4_AUTONOMY_SCRIPT}")
     try:
-        subprocess.run([TM4_PYTHON_BIN, "--version"], capture_output=True, check=True)
-    except Exception as e:
-        errors.append(f"TM4_PYTHON_BIN ({TM4_PYTHON_BIN}) verification failed: {e}")
+        # 1. Preflight Validation
+        errors = []
+        if not TM4_CORE_PATH.exists():
+            errors.append(f"TM4_CORE_PATH does not exist: {TM4_CORE_PATH}")
+        if not TM4_AUTONOMY_SCRIPT.exists():
+            errors.append(f"TM4_AUTONOMY_SCRIPT does not exist: {TM4_AUTONOMY_SCRIPT}")
+        try:
+            subprocess.run([TM4_PYTHON_BIN, "--version"], capture_output=True, check=True)
+        except Exception as e:
+            errors.append(f"TM4_PYTHON_BIN ({TM4_PYTHON_BIN}) verification failed: {e}")
 
-    if errors:
-        for err in errors:
-            append_line(stderr_log, f"[{utc_now_iso()}] PREFLIGHT ERROR: {err}")
-        _emit_event(event_log, "preflight_failed", errors=errors)
-        write_json(run_dir / "status.json", {
+        if errors:
+            for err in errors:
+                append_line(stderr_log, f"[{utc_now_iso()}] PREFLIGHT ERROR: {err}")
+            _emit_event(event_log, "preflight_failed", errors=errors)
+            write_json(run_dir / "status.json", {
+                "experiment_id": exp_id,
+                "status": "failed",
+                "preflight_status": "failed",
+                "preflight_errors": errors,
+                "ts_utc": utc_now_iso(),
+            })
+            raise RuntimeError(f"Preflight validation failed for {exp_id}")
+
+        _emit_event(event_log, "preflight_passed")
+
+        # 2. Capture git hashes
+        tm4_git_hash = _safe_git_hash(TM4_CORE_PATH)
+        tm4server_git_hash = _safe_git_hash(Path(__file__).parent.parent)
+
+        # 3. Write config.json (resolved run configuration snapshot)
+        config_snapshot = {
             "experiment_id": exp_id,
-            "status": "failed",
-            "preflight_status": "failed",
-            "preflight_errors": errors,
-            "ts_utc": utc_now_iso(),
-        })
-        raise RuntimeError(f"Preflight validation failed for {exp_id}")
+            "task": manifest.get("task"),
+            "model": manifest.get("model"),
+            "parameters": manifest.get("parameters", {}),
+            "tm4_core_path": str(TM4_CORE_PATH),
+            "tm4_script": str(TM4_AUTONOMY_SCRIPT),
+            "tm4_python_bin": TM4_PYTHON_BIN,
+            "tm4_extra_args": TM4_AUTONOMY_EXTRA_ARGS,
+            "tm4_git_hash": tm4_git_hash,
+            "tm4server_git_hash": tm4server_git_hash,
+            "submitted_at": manifest.get("submitted_at"),
+            "started_at": started_at,
+        }
+        write_json(run_dir / "config.json", config_snapshot)
 
-    _emit_event(event_log, "preflight_passed")
+        # 4. Write tm4_input_manifest.json
+        tm4_payload = {
+            "experiment_id": exp_id,
+            "task": manifest.get("task"),
+            "model": manifest.get("model"),
+            "submitted_at": manifest.get("submitted_at"),
+            "tm4server_received_at": started_at,
+            "parameters": manifest.get("parameters", {}),
+        }
+        write_json(tm4_input_path, tm4_payload)
 
-    # 2. Capture git hashes
-    tm4_git_hash = _safe_git_hash(TM4_CORE_PATH)
-    tm4server_git_hash = _safe_git_hash(Path(__file__).parent.parent)
+        # 5. Environment & Command Setup
+        env = os.environ.copy()
+        env["TM4SERVER_RUN_DIR"] = str(run_dir)
+        env["TM4SERVER_EXPERIMENT_ID"] = exp_id
+        env["TM4SERVER_INPUT_MANIFEST"] = str(tm4_input_path)
+        env["TM4_OUTPUT_DIR"] = str(run_dir)
 
-    # 3. Write config.json (resolved run configuration snapshot)
-    config_snapshot = {
-        "experiment_id": exp_id,
-        "task": manifest.get("task"),
-        "model": manifest.get("model"),
-        "parameters": manifest.get("parameters", {}),
-        "tm4_core_path": str(TM4_CORE_PATH),
-        "tm4_script": str(TM4_AUTONOMY_SCRIPT),
-        "tm4_python_bin": TM4_PYTHON_BIN,
-        "tm4_extra_args": TM4_AUTONOMY_EXTRA_ARGS,
-        "tm4_git_hash": tm4_git_hash,
-        "tm4server_git_hash": tm4server_git_hash,
-        "submitted_at": manifest.get("submitted_at"),
-        "started_at": started_at,
-    }
-    write_json(run_dir / "config.json", config_snapshot)
+        cmd = [TM4_PYTHON_BIN, str(TM4_AUTONOMY_SCRIPT)] + TM4_AUTONOMY_EXTRA_ARGS
+        append_line(stdout_log, f"[{utc_now_iso()}] Launching command: {' '.join(cmd)}")
 
-    # 4. Write tm4_input_manifest.json
-    tm4_payload = {
-        "experiment_id": exp_id,
-        "task": manifest.get("task"),
-        "model": manifest.get("model"),
-        "submitted_at": manifest.get("submitted_at"),
-        "tm4server_received_at": started_at,
-        "parameters": manifest.get("parameters", {}),
-    }
-    write_json(tm4_input_path, tm4_payload)
+        _emit_event(event_log, "subprocess_started", command=cmd[0], script=str(TM4_AUTONOMY_SCRIPT))
 
-    # 5. Environment & Command Setup
-    env = os.environ.copy()
-    env["TM4SERVER_RUN_DIR"] = str(run_dir)
-    env["TM4SERVER_EXPERIMENT_ID"] = exp_id
-    env["TM4SERVER_INPUT_MANIFEST"] = str(tm4_input_path)
-    env["TM4_OUTPUT_DIR"] = str(run_dir)
+        # 6. Spawn subprocess
+        with stdout_log.open("a", encoding="utf-8") as out, stderr_log.open("a", encoding="utf-8") as err:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(TM4_CORE_PATH),
+                env=env,
+                stdout=out,
+                stderr=err,
+                text=True,
+                check=False,
+            )
 
-    cmd = [TM4_PYTHON_BIN, str(TM4_AUTONOMY_SCRIPT)] + TM4_AUTONOMY_EXTRA_ARGS
-    append_line(stdout_log, f"[{utc_now_iso()}] Launching command: {' '.join(cmd)}")
+        completed_at = utc_now_iso()
+        duration_s = round(time.monotonic() - started_ts, 2)
 
-    _emit_event(event_log, "subprocess_started", command=cmd[0], script=str(TM4_AUTONOMY_SCRIPT))
-
-    # 6. Spawn subprocess
-    with stdout_log.open("a", encoding="utf-8") as out, stderr_log.open("a", encoding="utf-8") as err:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(TM4_CORE_PATH),
-            env=env,
-            stdout=out,
-            stderr=err,
-            text=True,
-            check=False,
+        _emit_event(
+            event_log, "subprocess_completed",
+            return_code=proc.returncode,
+            duration_s=duration_s,
         )
 
-    completed_at = utc_now_iso()
-    duration_s = round(time.monotonic() - started_ts, 2)
+        # 7. Native artifact detection (read-only)
+        known_outputs = {}
+        for filename in [
+            "generation_meta.json",
+            "run_manifest.json",
+            "scores.json",
+            "event_log.jsonl",  # TM4 core's own event log if it exists
+        ]:
+            known_outputs[filename] = (run_dir / filename).exists()
 
-    _emit_event(
-        event_log, "subprocess_completed",
-        return_code=proc.returncode,
-        duration_s=duration_s,
-    )
+        run_status = "success" if proc.returncode == 0 else "failed"
 
-    # 7. Native artifact detection (read-only)
-    known_outputs = {}
-    for filename in [
-        "generation_meta.json",
-        "run_manifest.json",
-        "scores.json",
-        "event_log.jsonl",  # TM4 core's own event log if it exists
-    ]:
-        known_outputs[filename] = (run_dir / filename).exists()
+        # 8. Write results.json
+        summary = {
+            "experiment_id": exp_id,
+            "task": manifest.get("task"),
+            "model": manifest.get("model"),
+            "status": run_status,
+            "return_code": proc.returncode,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_s": duration_s,
+            "tm4_git_hash": tm4_git_hash,
+            "tm4server_git_hash": tm4server_git_hash,
+            "known_outputs": known_outputs,
+        }
 
-    run_status = "success" if proc.returncode == 0 else "failed"
+        result_hash = hashlib.sha256(
+            json.dumps(summary, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
-    # 8. Write results.json
-    summary = {
-        "experiment_id": exp_id,
-        "task": manifest.get("task"),
-        "model": manifest.get("model"),
-        "status": run_status,
-        "return_code": proc.returncode,
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "duration_s": duration_s,
-        "tm4_git_hash": tm4_git_hash,
-        "tm4server_git_hash": tm4server_git_hash,
-        "known_outputs": known_outputs,
-    }
+        write_json(run_dir / "results.json", {
+            "summary": summary,
+            "result_hash": result_hash,
+        })
 
-    result_hash = hashlib.sha256(
-        json.dumps(summary, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+        # 9. Write final status.json
+        write_json(run_dir / "status.json", {
+            "experiment_id": exp_id,
+            "status": run_status,
+            "preflight_status": "passed",
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_s": duration_s,
+            "ts_utc": completed_at,
+        })
 
-    write_json(run_dir / "results.json", {
-        "summary": summary,
-        "result_hash": result_hash,
-    })
+        if proc.returncode == 0:
+            append_line(stdout_log, f"[{completed_at}] Run completed successfully in {duration_s}s")
+            return {"summary": summary, "result_hash": result_hash}
 
-    # 9. Write final status.json
-    write_json(run_dir / "status.json", {
-        "experiment_id": exp_id,
-        "status": run_status,
-        "preflight_status": "passed",
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "duration_s": duration_s,
-        "ts_utc": completed_at,
-    })
+        append_line(stdout_log, f"[{completed_at}] Run failed with code {proc.returncode} after {duration_s}s")
+        raise RuntimeError(f"TM4 subprocess failed with exit code {proc.returncode}")
 
-    if proc.returncode == 0:
-        append_line(stdout_log, f"[{completed_at}] Run completed successfully in {duration_s}s")
-        return {"summary": summary, "result_hash": result_hash}
+    finally:
+        try:
+            summary_path = RunSummaryExtractor(
+                run_dir=run_dir,
+                tm4_core_repo=TM4_CORE_PATH,
+                tm4server_repo=Path(__file__).parent.parent,
+            ).write()
+            append_line(stdout_log, f"[{utc_now_iso()}] Wrote run summary: {summary_path}")
+            _emit_event(event_log, "run_summary_written", path=str(summary_path))
+        except Exception as exc:
+            append_line(stderr_log, f"[{utc_now_iso()}] RUN_SUMMARY ERROR: {exc}")
+            _emit_event(event_log, "run_summary_failed", error=str(exc))
+            # Critical enough to stop reporting chain
+            return
 
-    append_line(stdout_log, f"[{completed_at}] Run failed with code {proc.returncode} after {duration_s}s")
-    raise RuntimeError(f"TM4 subprocess failed with exit code {proc.returncode}")
+        try:
+            # We use VPS-style paths in the report itself for canonical documentation,
+            # but we use local paths for the ACTUAL file write during development.
+            report_path = ExperimentReportGenerator(
+                summary_path=summary_path,
+                docs_root=Path(__file__).parent.parent / "docs" / "experiments",
+                deployment_path="/opt/tm4server",
+                tm4_core_path="/opt/tm4-core",
+                runtime_root="/var/lib/tm4",
+            ).write()
+            append_line(stdout_log, f"[{utc_now_iso()}] Wrote experiment report: {report_path}")
+            _emit_event(event_log, "experiment_report_written", path=str(report_path))
+        except Exception as exc:
+            append_line(stderr_log, f"[{utc_now_iso()}] EXPERIMENT_REPORT ERROR: {exc}")
+            _emit_event(event_log, "experiment_report_failed", error=str(exc))
+            return
+
+        # 3. Optional Git Sync (Production Only)
+        if TM4_AUTO_PUSH_REPORTS:
+            try:
+                git_result = sync_report_to_git(
+                    repo_path=Path(__file__).parent.parent,
+                    report_path=report_path,
+                    exp_id=exp_id,
+                )
+                if git_result.get("ok"):
+                    append_line(
+                        stdout_log,
+                        f"[{utc_now_iso()}] GIT_SYNC OK: {git_result.get('message')}"
+                    )
+                    _emit_event(
+                        event_log,
+                        "git_sync_completed",
+                        ok=True,
+                        stage=str(git_result.get("stage")),
+                        message=str(git_result.get("message")),
+                    )
+                else:
+                    append_line(
+                        stderr_log,
+                        f"[{utc_now_iso()}] GIT_SYNC WARN: {git_result.get('message')} | "
+                        f"stage={git_result.get('stage')} | stderr={git_result.get('stderr', '')}"
+                    )
+                    _emit_event(
+                        event_log,
+                        "git_sync_completed",
+                        ok=False,
+                        stage=str(git_result.get("stage")),
+                        message=str(git_result.get("message")),
+                    )
+            except Exception as exc:
+                append_line(stderr_log, f"[{utc_now_iso()}] GIT_SYNC ERROR: {exc}")
+                _emit_event(event_log, "git_sync_failed", error=str(exc))
+        else:
+            append_line(stdout_log, f"[{utc_now_iso()}] GIT_SYNC SKIPPED: TM4_AUTO_PUSH_REPORTS disabled")
+            _emit_event(event_log, "git_sync_skipped", reason="TM4_AUTO_PUSH_REPORTS disabled")

@@ -31,3 +31,6 @@ TM4_PYTHON_BIN = os.getenv("TM4_PYTHON_BIN", "python")
 
 # Flexible CLI arguments for the autonomy script
 TM4_AUTONOMY_EXTRA_ARGS = []  # Extend this if required arguments are found later
+
+# Git Sync Configuration
+TM4_AUTO_PUSH_REPORTS = os.getenv("TM4_AUTO_PUSH_REPORTS", "0") == "1"
