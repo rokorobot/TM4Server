@@ -1,7 +1,11 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING
 from pathlib import Path
 import shutil
 import traceback
+
+if TYPE_CHECKING:
+    from .state import StateManager
 
 from .config import (
     QUEUED_DIR,
@@ -9,7 +13,6 @@ from .config import (
     COMPLETED_DIR,
     FAILED_DIR,
     RUNS_DIR,
-    STATUS_FILE,
     CURRENT_RUN_FILE,
 )
 from .utils import ensure_dir, read_json, write_json, utc_now_iso, append_line
@@ -19,11 +22,6 @@ from .runtime import run_experiment, _emit_event
 def init_dirs() -> None:
     for d in [QUEUED_DIR, RUNNING_DIR, COMPLETED_DIR, FAILED_DIR, RUNS_DIR]:
         ensure_dir(d)
-    write_json(STATUS_FILE, {
-        "status": "idle",
-        "ts_utc": utc_now_iso(),
-        "current_run": None,
-    })
 
 
 def next_manifest_file() -> Path | None:
@@ -33,14 +31,9 @@ def next_manifest_file() -> Path | None:
     return files[0] if files else None
 
 
-def process_one() -> bool:
+def process_one(state_manager: StateManager | None = None) -> bool:
     manifest_file = next_manifest_file()
     if manifest_file is None:
-        write_json(STATUS_FILE, {
-            "status": "idle",
-            "ts_utc": utc_now_iso(),
-            "current_run": None,
-        })
         return False
 
     running_manifest = RUNNING_DIR / manifest_file.name
@@ -59,11 +52,12 @@ def process_one() -> bool:
         "ts_utc": utc_now_iso(),
         "manifest_file": str(running_manifest),
     })
-    write_json(STATUS_FILE, {
-        "status": "running",
-        "ts_utc": utc_now_iso(),
-        "current_run": exp_id,
-    })
+    
+    if state_manager:
+        state_manager.write_status(
+            runtime_state="running",
+            current_exp_id=exp_id,
+        )
 
     stdout_log = run_dir / "stdout.log"
 
@@ -77,12 +71,6 @@ def process_one() -> bool:
         shutil.move(str(running_manifest), str(COMPLETED_DIR / running_manifest.name))
         _emit_event(run_dir / "event_log.jsonl", "manifest_moved_completed", destination="completed")
 
-        write_json(STATUS_FILE, {
-            "status": "idle",
-            "ts_utc": utc_now_iso(),
-            "current_run": None,
-            "last_completed_run": exp_id,
-        })
         return True
 
     except Exception as e:
@@ -103,10 +91,4 @@ def process_one() -> bool:
         shutil.move(str(running_manifest), str(FAILED_DIR / running_manifest.name))
         _emit_event(run_dir / "event_log.jsonl", "manifest_moved_failed", error=str(e))
 
-        write_json(STATUS_FILE, {
-            "status": "idle",
-            "ts_utc": utc_now_iso(),
-            "current_run": None,
-            "last_failed_run": exp_id,
-        })
         return True

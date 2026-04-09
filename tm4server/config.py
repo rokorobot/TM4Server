@@ -16,7 +16,12 @@ RUNNING_DIR = QUEUE_DIR / "running"
 COMPLETED_DIR = QUEUE_DIR / "completed"
 FAILED_DIR = QUEUE_DIR / "failed"
 
-STATUS_FILE = STATE_DIR / "status.json"
+# State Layer Configuration
+TM4_RUNTIME_ROOT = TM4_BASE
+TM4_STATE_ROOT = STATE_DIR
+TM4_STATUS_FILE = TM4_STATE_ROOT / "status.json"
+TM4_CONTROL_FILE = TM4_STATE_ROOT / "control.json"
+TM4_CONTROL_HISTORY_FILE = TM4_STATE_ROOT / "control_history.jsonl"
 CURRENT_RUN_FILE = STATE_DIR / "current_run.json"
 
 APP_NAME = "tm4server"
@@ -24,6 +29,7 @@ POLL_INTERVAL_S = int(os.getenv("TM4_POLL_INTERVAL_S", "3"))
 
 # TM4 Core Integration - VPS Defaults
 TM4_CORE_PATH = Path(os.getenv("TM4_CORE_PATH", "/opt/tm4-core"))
+TM4CORE_REPO_ROOT = TM4_CORE_PATH
 TM4_AUTONOMY_SCRIPT = Path(
     os.getenv("TM4_AUTONOMY_SCRIPT", str(TM4_CORE_PATH / "mvp" / "scripts" / "run_autonomy_loop.py"))
 )
