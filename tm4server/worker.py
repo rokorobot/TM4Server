@@ -31,6 +31,7 @@ def main() -> None:
         tm4server_repo=TM4SERVER_REPO_ROOT,
         tm4core_repo=TM4CORE_REPO_ROOT,
     )
+    state.ensure_defaults()
     
     print(f"TM4 Worker started (polling every {POLL_INTERVAL_S}s)")
     
@@ -47,48 +48,33 @@ def main() -> None:
             mode = state.read_control_mode()
             queue_depth = get_queue_depth()
 
+            # 1. Dispatch by Mode
             if mode == "halt":
-                state.write_status(
-                    runtime_state="halted",
-                    current_exp_id=None,
-                    queue_depth=queue_depth
-                )
-                print("Worker halting as requested.")
-                break
-
-            if mode == "pause":
-                # Heartbeat update while paused
-                state.write_status(
-                    runtime_state="paused",
-                    current_exp_id=None,
-                    queue_depth=queue_depth
-                )
+                state.write_status(runtime_state="halted", queue_depth=queue_depth)
                 time.sleep(POLL_INTERVAL_S)
                 continue
 
-            # 2. Normal run mode
+            if mode == "pause":
+                state.write_status(runtime_state="paused", queue_depth=queue_depth)
+                time.sleep(POLL_INTERVAL_S)
+                continue
+
+            # 2. Run mode: check for work
             try:
                 processed = process_one(state_manager=state)
                 if not processed:
-                    # Idle heartbeat
-                    state.write_status(
-                        runtime_state="idle",
-                        current_exp_id=None,
-                        queue_depth=queue_depth
-                    )
+                    # Idle state: symmetrical heartbeat
+                    state.write_status(runtime_state="idle", queue_depth=queue_depth)
                     time.sleep(POLL_INTERVAL_S)
-                else:
-                    # Run completed (process_one handled the 'running' status)
-                    # We update back to idle here
-                    state.write_status(
-                        runtime_state="idle",
-                        current_exp_id=None,
-                        queue_depth=get_queue_depth()
-                    )
+                    continue
+                
+                # If we processed something, process_one handled the 'running' status.
+                # We update back to idle for the next cycle.
+                state.write_status(runtime_state="idle", queue_depth=get_queue_depth())
+                
             except Exception as e:
                 state.write_status(
                     runtime_state="error",
-                    current_exp_id=None,
                     queue_depth=get_queue_depth(),
                     extra={"last_error": str(e)}
                 )
@@ -98,11 +84,10 @@ def main() -> None:
     except KeyboardInterrupt:
         state.write_status(
             runtime_state="halted",
-            current_exp_id=None,
             queue_depth=get_queue_depth(),
             extra={"reason": "keyboard_interrupt"}
         )
-        print("Worker stopped by user.")
+        print("\nWorker stopped by signal (KeyboardInterrupt).")
 
 
 if __name__ == "__main__":
