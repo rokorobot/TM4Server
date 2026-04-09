@@ -1,10 +1,24 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from .operator_console import router as operator_router
+import os
+from pathlib import Path
 
 app = FastAPI(title="TM4Server API")
+
+# Optional environment-guarded CORS for local UI development
+# Enable with TM4_API_CORS_ALLOWED=true
+if os.getenv("TM4_API_CORS_ALLOWED", "").lower() == "true":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
@@ -64,8 +78,32 @@ async def healthz():
     """Basic health check for the API process."""
     return {"ok": True}
 
-# Mount the operator console router
+# 📡 API Routing
 app.include_router(operator_router, prefix="/api")
+
+# 🖥️ Operator Console UI
+STATIC_DIR = Path(__file__).parent / "static"
+
+@app.get("/operator")
+async def get_operator():
+    """Serves the Operator Console entrypoint."""
+    index_file = STATIC_DIR / "index.html"
+    if not index_file.exists():
+        return JSONResponse(
+            status_code=404, 
+            content={
+                "ok": False, 
+                "error": {
+                    "code": "UI_NOT_BUILT", 
+                    "message": "Operator Console UI has not been built. Run 'npm run build' in /ui."
+                }
+            }
+        )
+    return FileResponse(index_file)
+
+# Mount static assets (JS/CSS) at /static prefix if built
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 if __name__ == "__main__":
     import uvicorn
