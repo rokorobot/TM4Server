@@ -1,11 +1,11 @@
-[Unit]
 Description=TM4Server Control Plane API
 After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+# NOTE: Service runs as root on this host (nodedicated tm4 user yet)
+User=root
+Group=root
 
 # WorkingDirectory is the repository root to ensure tm4server package is importable
 WorkingDirectory=/opt/tm4server
