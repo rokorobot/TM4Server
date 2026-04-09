@@ -1,0 +1,29 @@
+[Unit]
+Description=TM4Server Control Plane API
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# WorkingDirectory is the repository root to ensure tm4server package is importable
+WorkingDirectory=/opt/tm4server
+
+# Canonical environment and runtime configuration
+EnvironmentFile=-/etc/tm4server.env
+Environment=PYTHONPATH=.
+
+# Execution using the dedicated virtual environment
+ExecStart=/opt/tm4server/venv/bin/python -m uvicorn tm4server.api.main:app --host 0.0.0.0 --port 8000
+
+Restart=always
+RestartSec=3
+
+# Industrial hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

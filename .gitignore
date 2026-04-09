@@ -4,10 +4,14 @@ __pycache__/
 .venv/
 venv/
 .env
-local_runtime/
+local_runtime*/
 *.log
 .pytest_cache/
 .idea/
 .vscode/
 dist/
 build/
+
+*.zip
+PROJECT_DEPTH_DOSSIER.md
+PROJECT_STATUS.md

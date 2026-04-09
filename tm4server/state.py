@@ -36,11 +36,21 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+def read_json_strict(path: Path) -> dict[str, Any]:
+    """Strictly reads JSON from path. 
+    Raises FileNotFoundError, JSONDecodeError, or other OSErrors.
+    """
+    # utf-8-sig handles potential BOM from Windows/PowerShell
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def read_json_safe(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+    """Safe read that only handles FileNotFoundError (returning default).
+    Raises JSONDecodeError, PermissionError, and other IO errors.
+    """
     try:
-        # utf-8-sig handles potential BOM from Windows/PowerShell
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception:
+        return read_json_strict(path)
+    except FileNotFoundError:
         return default.copy()
 
 
@@ -84,7 +94,8 @@ class StateManager:
         self.paths = StatePaths.from_runtime_root(runtime_root)
         self.tm4server_repo = tm4server_repo
         self.tm4core_repo = tm4core_repo
-        self.ensure_defaults()
+        # Initialization must be read-only.
+        # Defaults are ensured during explicit bootstrap or writer startup (e.g. worker).
 
     def ensure_defaults(self) -> None:
         """Ensures that the control.json file exists with a valid default."""
@@ -92,15 +103,19 @@ class StateManager:
             self.set_control_mode("run", source="system_init")
 
     def read_control_mode(self) -> str:
-        """Reads the current control mode, falling back to 'run' if missing or malformed."""
-        payload = read_json(
+        """Reads current control mode. 
+        Returns 'run' if file is missing.
+        Raises JSONDecodeError/ValueError if file is corrupted or semantically invalid.
+        """
+        payload = read_json_safe(
             self.paths.control_json,
             {"control_version": 1, "mode": "run"},
         )
-        mode = payload.get("mode", "run")
+        
+        mode = payload.get("mode")
         if mode not in {"run", "pause", "halt"}:
-            # If malformed, reset to default on next write or return default now
-            return "run"
+            raise ValueError(f"Invalid or missing control mode in state file: {mode}")
+        
         return mode
 
     def set_control_mode(self, mode: str, source: str = "manual") -> None:
@@ -125,6 +140,39 @@ class StateManager:
                 "result": "accepted",
             },
         )
+
+    def read_status(self) -> dict[str, Any]:
+        """Reads current status from disk. Returns empty dict if missing.
+        Raises JSONDecodeError if corrupted.
+        """
+        return read_json_safe(self.paths.status_json, {})
+
+    def read_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Reads latest control history entries from JSONL.
+        Zero-tolerance policy: any malformed line raises JSONDecodeError.
+        """
+        if not self.paths.control_history_jsonl.exists():
+            return []
+        
+        # Hard cap for performance
+        limit = min(max(1, limit), 500)
+        
+        with self.paths.control_history_jsonl.open("r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+            history = []
+            for line in reversed(lines):
+                # Strict parsing: failure here propagates as JSONDecodeError
+                entry = json.loads(line)
+                
+                # Semantic check
+                required = {"ts_utc", "action", "source", "result"}
+                if not all(k in entry for k in required):
+                    raise ValueError(f"Malformed history entry: missing fields. Entry: {line}")
+                
+                history.append(entry)
+                if len(history) >= limit:
+                    break
+            return history
 
     def write_status(
         self,

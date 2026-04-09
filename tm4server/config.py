@@ -24,6 +24,10 @@ TM4_CONTROL_FILE = TM4_STATE_ROOT / "control.json"
 TM4_CONTROL_HISTORY_FILE = TM4_STATE_ROOT / "control_history.jsonl"
 CURRENT_RUN_FILE = STATE_DIR / "current_run.json"
 
+# API Configuration
+API_HOST = os.getenv("TM4_API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("TM4_API_PORT", "8000"))
+
 APP_NAME = "tm4server"
 POLL_INTERVAL_S = int(os.getenv("TM4_POLL_INTERVAL_S", "3"))
 
