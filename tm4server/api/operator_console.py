@@ -346,3 +346,24 @@ async def get_gradient_analysis():
                 }
             }
         )
+
+@router.get("/analysis/pareto")
+async def get_pareto_analysis():
+    """Returns cross-model comparisons (leaderboards) per task using governance-weighted scoring."""
+    try:
+        from tm4server.analysis.pareto_analyzer import ParetoAnalyzer
+        report = state.build_regime_index(RUNS_DIR)
+        analyzer = ParetoAnalyzer()
+        pareto_report = analyzer.analyze_report(report)
+        return {"ok": True, "report": pareto_report}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "PARETO_ERROR",
+                    "message": f"Failed to compute model Pareto rankings: {str(e)}"
+                }
+            }
+        )

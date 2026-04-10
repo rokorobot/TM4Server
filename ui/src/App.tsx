@@ -103,6 +103,27 @@ interface GradientReport {
   regimes: RegimeInsight[];
 }
 
+interface ModelRank {
+  model: string;
+  score: number;
+  base_score: number;
+  power: number;
+  yield: number;
+  stability: number;
+  reliability: number;
+  label: string;
+  run_count: number;
+  is_provisional: boolean;
+  penalty_applied: boolean;
+  reason: string;
+}
+
+interface ParetoReport {
+  version: string;
+  generated_at: string;
+  tasks: Record<string, ModelRank[]>;
+}
+
 // --- Components ---
 
 function ErrorBanner({ error }: { error: ApiError }) {
@@ -241,6 +262,74 @@ function RegimeCard({ insight }: { insight: RegimeInsight }) {
   );
 }
 
+function ParetoTaskCard({ task, ranks }: { task: string; ranks: ModelRank[] }) {
+  const winner = ranks.find(r => !r.is_provisional);
+  
+  return (
+    <div className="flex flex-col gap-5 rounded-3xl border border-zinc-800 bg-zinc-950/50 p-8">
+      <div className="flex items-center justify-between border-b border-zinc-900 pb-4">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.25em] text-zinc-600">Task Cohort</div>
+          <h3 className="mt-1 text-xl font-black text-zinc-100">{task}</h3>
+        </div>
+        {winner && (
+          <div className="flex flex-col items-end">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-emerald-500">Governance Winner</span>
+            <span className="text-sm font-bold text-zinc-200">{winner.model}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        {ranks.map((r, idx) => (
+          <div key={r.model} className={`relative flex flex-col gap-3 rounded-2xl border p-4 transition ${r.is_provisional ? 'border-zinc-800 bg-zinc-900/10 opacity-50' : 'border-zinc-800 bg-zinc-900/40'}`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="flex h-5 w-5 items-center justify-center rounded bg-zinc-800 text-[10px] font-bold text-zinc-500">{idx + 1}</span>
+                <span className="text-sm font-bold text-zinc-100">{r.model}</span>
+                {r.penalty_applied && (
+                  <span className="text-[8px] font-black uppercase text-amber-500 border border-amber-900 bg-amber-950/20 px-1.5 py-0.5 rounded">Risk Penalty</span>
+                )}
+                 {r.label === 'SATURATED_REGIME' && (
+                  <span className="text-[8px] font-black uppercase text-purple-500 border border-purple-900 bg-purple-950/20 px-1.5 py-0.5 rounded">Low Headroom</span>
+                )}
+              </div>
+              <div className="flex flex-col items-end">
+                 <span className="text-[10px] font-mono font-bold text-cyan-500">{r.score.toFixed(3)}</span>
+                 <span className="text-[8px] uppercase font-bold text-zinc-600 tracking-tighter">Weighted Score</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-4 gap-2 border-t border-zinc-800/50 pt-3">
+              <div className="flex flex-col">
+                <span className="text-[8px] font-bold uppercase text-zinc-600">Power</span>
+                <span className="text-[10px] font-mono text-zinc-200">{(r.power * 100).toFixed(0)}%</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[8px] font-bold uppercase text-zinc-600">Yield</span>
+                <span className="text-[10px] font-mono text-zinc-200">{(r.yield * 100).toFixed(0)}%</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[8px] font-bold uppercase text-zinc-600">Stab</span>
+                <span className="text-[10px] font-mono text-zinc-200">{(r.stability * 100).toFixed(0)}%</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[8px] font-bold uppercase text-zinc-600">Reli</span>
+                <span className="text-[10px] font-mono text-zinc-200">{(r.reliability * 100).toFixed(0)}%</span>
+              </div>
+            </div>
+            {r.is_provisional && (
+              <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-zinc-950/40 backdrop-blur-[1px]">
+                 <span className="text-[10px] font-black uppercase tracking-widest text-zinc-500">Insufficient Evidence</span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function JsonView({ title, data }: { title: string; data: any }) {
   return (
     <div className="flex flex-col gap-2">
@@ -294,6 +383,9 @@ export default function App() {
   const [gradients, setGradients] = useState<GradientReport | null>(null);
   const [gradientsErr, setGradientsErr] = useState<ApiError | null>(null);
 
+  const [pareto, setPareto] = useState<ParetoReport | null>(null);
+  const [paretoErr, setParetoErr] = useState<ApiError | null>(null);
+
   const fetchJson = async (path: string, options?: RequestInit) => {
     const resp = await fetch(path, options);
     const data = await resp.json();
@@ -306,7 +398,7 @@ export default function App() {
 
   const refreshData = useCallback(async () => {
     let successCount = 0;
-    const totalRequests = 7;
+    const totalRequests = 8;
 
     // Health check
     try {
@@ -362,6 +454,14 @@ export default function App() {
       setGradientsErr(null);
       successCount++;
     } catch (e: any) { setGradientsErr(e); }
+
+    // Pareto
+    try {
+      const p = await fetchJson('/api/analysis/pareto');
+      setPareto(p.report);
+      setParetoErr(null);
+      successCount++;
+    } catch (e: any) { setParetoErr(e); }
 
     // Only update "Last Refresh" if all core endpoints succeeded
     if (successCount === totalRequests) {
@@ -527,6 +627,30 @@ export default function App() {
                 <Database className="h-8 w-8 mb-3 opacity-20" />
                 <div className="text-sm font-medium">No regime insights available yet.</div>
                 <div className="text-[10px] uppercase tracking-widest mt-1">Requires at least 3 classified runs per Task/Model regime.</div>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Model Selection Dashboard (Pareto) */}
+        <section className="flex flex-col gap-4 lg:col-span-2">
+          <div className="flex items-center gap-2 px-1 text-emerald-500">
+            <Activity className="h-4 w-4" />
+            <h2 className="text-xs font-bold uppercase tracking-[0.25em]">Model Selection (Pareto Layer)</h2>
+          </div>
+          
+          <div className="grid gap-6 md:grid-cols-2">
+            {paretoErr ? (
+              <div className="md:col-span-2"><ErrorBanner error={paretoErr} /></div>
+            ) : (pareto && Object.keys(pareto.tasks).length > 0) ? (
+              Object.entries(pareto.tasks).map(([task, ranks]) => (
+                <ParetoTaskCard key={task} task={task} ranks={ranks} />
+              ))
+            ) : (
+              <div className="md:col-span-2 flex flex-col items-center justify-center rounded-3xl border border-zinc-800 border-dashed bg-zinc-950/30 py-12 text-zinc-600">
+                <Database className="h-8 w-8 mb-3 opacity-20" />
+                <div className="text-sm font-medium">Insufficient data for model comparison.</div>
+                <div className="text-[10px] uppercase tracking-widest mt-1">Requires at least one Task with multiple model regimes.</div>
               </div>
             )}
           </div>

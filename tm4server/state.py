@@ -505,10 +505,15 @@ class StateManager:
             if not d.is_dir() or not d.name.startswith("EXP"):
                 continue
                 
+            manifest_path = d / "run_manifest.json"
+            class_path = d / "classification.json"
+            
             if not manifest_path.exists():
                 continue
                 
             manifest = read_json_safe(manifest_path, {})
+            task = manifest.get("task", "unknown")
+            model = manifest.get("model", "unknown")
             class_payload = read_json_safe(class_path, {})
             classification = class_payload.get("classification")
             

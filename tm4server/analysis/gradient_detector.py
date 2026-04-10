@@ -49,18 +49,26 @@ class GradientDetector:
         dist_weighted: Dict[str, float] = {k: 0.0 for k in dist_counts.keys()}
         
         total_confidence = 0.0
+        total_conv_improvement = 0.0
+        conv_runs_count = 0
         
         # 2. Aggregate
         for run in runs:
             # We assume 'run' is the 'classification' block from our schema
             label = run.get("label", "UNCLASSIFIED")
             confidence = run.get("confidence", 0.0)
+            evidence = run.get("evidence", {})
             
             dist_counts[label] = dist_counts.get(label, 0) + 1
             dist_weighted[label] = dist_weighted.get(label, 0.0) + confidence
             total_confidence += confidence
 
+            if label == "CONVERGENT":
+                total_conv_improvement += evidence.get("net_improvement", 0.0)
+                conv_runs_count += 1
+
         mean_confidence = total_confidence / run_count if run_count > 0 else 0.0
+        mean_net_improvement = total_conv_improvement / conv_runs_count if conv_runs_count > 0 else 0.0
         
         # Calculate shares (weighted scores / total confidence)
         total_weighted_score = sum(dist_weighted.values())
@@ -111,6 +119,7 @@ class GradientDetector:
             "model": model,
             "label": label,
             "mean_confidence": round(mean_confidence, 2),
+            "mean_net_improvement": round(mean_net_improvement, 4),
             "run_count": run_count,
             "distribution_counts": dist_counts,
             "distribution_weighted": {k: round(v, 2) for k, v in dist_weighted.items()},
