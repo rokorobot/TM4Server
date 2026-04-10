@@ -10,6 +10,7 @@ RUNS_DIR = TM4_BASE / "runs"
 STATE_DIR = TM4_BASE / "state"
 ARTIFACTS_DIR = TM4_BASE / "artifacts"
 LOGS_DIR = TM4_BASE / "logs"
+DECISIONS_DIR = TM4_BASE / "decisions"
 
 QUEUED_DIR = QUEUE_DIR / "queued"
 RUNNING_DIR = QUEUE_DIR / "running"

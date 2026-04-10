@@ -15,7 +15,10 @@ import {
   ChevronDown,
   ChevronRight,
   Database,
-  Loader2
+  Loader2,
+  AlertCircle,
+  ShieldCheck,
+  Lock as LockIcon
 } from 'lucide-react';
 
 const POLL_INTERVAL = 3000;
@@ -122,6 +125,35 @@ interface ParetoReport {
   version: string;
   generated_at: string;
   tasks: Record<string, ModelRank[]>;
+}
+
+interface DecisionChecks {
+  evidence_pass: boolean;
+  reliability_pass: boolean;
+  stability_pass: boolean;
+  margin_pass: boolean;
+  governance_clear: boolean;
+}
+
+interface TaskDecision {
+  decision_version: string;
+  task: string;
+  promotion_status: 'PROMOTE' | 'HOLD' | 'REJECT' | 'INSUFFICIENT_EVIDENCE';
+  reason: string;
+  locked_at: string;
+  thresholds_used: Record<string, number>;
+  winner_model?: string;
+  winner_score?: number;
+  winner_snapshot?: Record<string, any>;
+  runner_up_model?: string;
+  runner_up_score?: number;
+  margin?: number;
+  checks?: DecisionChecks;
+}
+
+interface DecisionReport {
+  version: string;
+  decisions: Record<string, TaskDecision>;
 }
 
 // --- Components ---
@@ -330,6 +362,80 @@ function ParetoTaskCard({ task, ranks }: { task: string; ranks: ModelRank[] }) {
   );
 }
 
+function PromotionCard({ decision, onLock }: { decision: TaskDecision; onLock: () => void }) {
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'PROMOTE': return 'text-emerald-500 border-emerald-900 bg-emerald-950/20';
+      case 'HOLD': return 'text-amber-500 border-amber-900 bg-amber-950/20';
+      case 'REJECT': return 'text-rose-500 border-rose-900 bg-rose-950/20';
+      default: return 'text-zinc-500 border-zinc-900 bg-zinc-950/20';
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4 rounded-3xl border border-zinc-800 bg-zinc-950/60 p-6">
+      <div className="flex items-center justify-between">
+         <div>
+            <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-600">Decision Gate</div>
+            <div className="text-sm font-black text-zinc-100">{decision.task}</div>
+         </div>
+         <div className={`px-2 py-0.5 rounded border text-[9px] font-black uppercase tracking-widest ${getStatusColor(decision.promotion_status)}`}>
+            {decision.promotion_status}
+         </div>
+      </div>
+
+      <div className="space-y-3">
+         {decision.winner_model ? (
+           <div className="flex flex-col gap-1">
+              <span className="text-[9px] font-bold uppercase text-zinc-700">Projected Winner</span>
+              <div className="flex items-center justify-between">
+                 <span className="text-xs font-bold text-zinc-200">{decision.winner_model}</span>
+                 <span className="text-xs font-mono text-cyan-500">{decision.winner_score?.toFixed(3)}</span>
+              </div>
+           </div>
+         ) : (
+           <div className="py-2 text-center text-[10px] italic text-zinc-600">No candidate eligible for promotion criteria.</div>
+         )}
+
+         {decision.checks && (
+           <div className="grid grid-cols-2 gap-2 border-t border-zinc-900 pt-3">
+              <CheckItem label="Evidence" passed={decision.checks.evidence_pass} />
+              <CheckItem label="Reliability" passed={decision.checks.reliability_pass} />
+              <CheckItem label="Stability" passed={decision.checks.stability_pass} />
+              <CheckItem label="Margin" passed={decision.checks.margin_pass} />
+           </div>
+         )}
+      </div>
+
+      <div className="mt-auto pt-4 flex flex-col gap-3">
+         <div className="text-[10px] leading-tight text-zinc-500 line-clamp-2 italic">
+            "{decision.reason}"
+         </div>
+         <button 
+           onClick={onLock}
+           disabled={decision.promotion_status !== 'PROMOTE' && decision.promotion_status !== 'HOLD'}
+           className="w-full py-2 rounded-xl bg-zinc-100 text-zinc-950 text-[10px] font-black uppercase tracking-widest hover:bg-white disabled:opacity-20 disabled:grayscale transition-all"
+         >
+           Lock Governance Decision
+         </button>
+      </div>
+    </div>
+  );
+}
+
+function CheckItem({ label, passed }: { label: string; passed: boolean }) {
+  return (
+    <div className="flex items-center justify-between">
+       <span className="text-[9px] text-zinc-600 uppercase font-bold">{label}</span>
+       {passed ? (
+         <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500" />
+       ) : (
+         <AlertCircle className="h-2.5 w-2.5 text-amber-500" />
+       )}
+    </div>
+  );
+}
+
 function JsonView({ title, data }: { title: string; data: any }) {
   return (
     <div className="flex flex-col gap-2">
@@ -386,6 +492,9 @@ export default function App() {
   const [pareto, setPareto] = useState<ParetoReport | null>(null);
   const [paretoErr, setParetoErr] = useState<ApiError | null>(null);
 
+  const [decisions, setDecisions] = useState<DecisionReport | null>(null);
+  const [decisionsErr, setDecisionsErr] = useState<ApiError | null>(null);
+
   const fetchJson = async (path: string, options?: RequestInit) => {
     const resp = await fetch(path, options);
     const data = await resp.json();
@@ -398,7 +507,6 @@ export default function App() {
 
   const refreshData = useCallback(async () => {
     let successCount = 0;
-    const totalRequests = 8;
 
     // Health check
     try {
@@ -463,8 +571,16 @@ export default function App() {
       successCount++;
     } catch (e: any) { setParetoErr(e); }
 
+    // Decisons
+    try {
+      const d = await fetchJson('/api/analysis/decisions');
+      setDecisions(d.report);
+      setDecisionsErr(null);
+      successCount++;
+    } catch (e: any) { setDecisionsErr(e); }
+
     // Only update "Last Refresh" if all core endpoints succeeded
-    if (successCount === totalRequests) {
+    if (successCount === 9) {
       setLastSuccess(new Date().toLocaleTimeString());
     }
   }, []);
@@ -504,6 +620,15 @@ export default function App() {
       setLaunchErr(e);
     } finally {
       setLaunchInFlight(false);
+    }
+  };
+
+  const handleLockDecision = async (task: string) => {
+    try {
+      await fetchJson(`/api/tasks/${task}/decide`, { method: 'POST' });
+      await refreshData();
+    } catch (e: any) {
+      alert(`Decision Lock Failed: ${e.message || JSON.stringify(e)}`);
     }
   };
 
@@ -883,6 +1008,30 @@ export default function App() {
                 </table>
               </div>
             )}
+          </div>
+        </section>
+
+        {/* Model Promotion Console (Decision Gate) */}
+        <section className="flex flex-col gap-4 lg:col-span-2">
+          <div className="flex items-center gap-2 px-1 text-blue-500">
+            <LockIcon className="h-4 w-4" />
+            <h2 className="text-xs font-bold uppercase tracking-[0.25em]">Model Promotion Console</h2>
+          </div>
+          
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+             {decisionsErr ? (
+               <div className="md:col-span-2 lg:col-span-3"><ErrorBanner error={decisionsErr} /></div>
+             ) : (decisions && Object.keys(decisions.decisions).length > 0) ? (
+               Object.entries(decisions.decisions).map(([task, decision]) => (
+                 <PromotionCard key={task} decision={decision} onLock={() => handleLockDecision(task)} />
+               ))
+             ) : (
+               <div className="md:col-span-2 lg:col-span-3 flex flex-col items-center justify-center rounded-3xl border border-zinc-800 border-dashed bg-zinc-950/30 py-12 text-zinc-600">
+                 <ShieldCheck className="h-8 w-8 mb-3 opacity-20" />
+                 <div className="text-sm font-medium">No promotion decisions projected.</div>
+                 <div className="text-[10px] uppercase tracking-widest mt-1">Requires at least 5 classified runs per Task.</div>
+               </div>
+             )}
           </div>
         </section>
 

@@ -2,8 +2,10 @@ from fastapi import APIRouter, HTTPException, Query
 import json
 
 from ..state import StateManager, atomic_write_json, utc_now_iso, git_short_commit, read_json_strict
-from ..config import TM4_RUNTIME_ROOT, TM4SERVER_REPO_ROOT, TM4CORE_REPO_ROOT, RUNS_DIR
+from ..config import TM4_RUNTIME_ROOT, TM4SERVER_REPO_ROOT, TM4CORE_REPO_ROOT, RUNS_DIR, DECISIONS_DIR
 from ..analysis.classifier import ExperimentClassifier
+from ..analysis.pareto_analyzer import ParetoAnalyzer
+from ..analysis.decision_engine import DecisionEngine
 
 router = APIRouter(tags=["Operator Console"])
 
@@ -366,4 +368,55 @@ async def get_pareto_analysis():
                     "message": f"Failed to compute model Pareto rankings: {str(e)}"
                 }
             }
+        )
+
+@router.get("/analysis/decisions")
+async def get_projected_decisions():
+    """Calculates current 'Projected Decisions' for all tasks without persisting."""
+    try:
+        report = state.build_regime_index(RUNS_DIR)
+        pareto = ParetoAnalyzer().analyze_report(report)
+        engine = DecisionEngine()
+        
+        decisions = {}
+        for task, ranks in pareto.get("tasks", {}).items():
+            decisions[task] = engine.evaluate_task(task, ranks)
+            
+        return {
+            "ok": True, 
+            "report": {
+                "version": engine.VERSION,
+                "decisions": decisions
+            }
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": {"code": "DECISION_ERROR", "message": str(e)}}
+        )
+
+@router.post("/tasks/{task}/decide")
+async def lock_task_decision(task: str):
+    """Computes and PERSISTS a formal governance decision for a task."""
+    try:
+        # 1. Compute current projected decision
+        report = state.build_regime_index(RUNS_DIR)
+        pareto = ParetoAnalyzer().analyze_report(report)
+        ranks = pareto.get("tasks", {}).get(task)
+        
+        if not ranks:
+            raise ValueError(f"No evidence found for task '{task}'")
+            
+        engine = DecisionEngine()
+        decision = engine.evaluate_task(task, ranks)
+        
+        # 2. Persist to decisions/{task}.json
+        decision_path = DECISIONS_DIR / f"{task}.json"
+        atomic_write_json(decision_path, decision)
+        
+        return {"ok": True, "decision": decision, "path": str(decision_path)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": {"code": "DECISION_LOCK_ERROR", "message": str(e)}}
         )

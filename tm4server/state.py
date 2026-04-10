@@ -527,6 +527,10 @@ class StateManager:
                         classifier = ExperimentClassifier()
                         result = classifier.classify(summary)
                         classification = result.get("classification")
+                        
+                        # Persist the inferred classification for future truth consistency
+                        if classification:
+                            atomic_write_json(class_path, result)
                     except Exception:
                         pass
             
