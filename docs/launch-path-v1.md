@@ -1,6 +1,6 @@
-# TM4 Launch Path v1 - Technical Specification
+# TM4 Launch Path & Runs Explorer - Technical Specification
 
-This document defines the high-integrity workload management system implemented in TM4Server v1.0-launch.
+This document defines the high-integrity workload management and observability system implemented in TM4Server v1.1-runs-explorer.
 
 ## 🏛️ Architectural Principles
 
@@ -40,3 +40,24 @@ On startup, the TM4 Worker performs a **Recovery Scan**:
 - Identifies any directory with `status: "running"` in `runtime_state.json`.
 - Checks if the recorded `worker_pid` is still alive.
 - If dead AND `run_summary.json` is missing, marks the run as `interrupted` with a timestamp and failure reason.
+## 🔍 Runs Explorer (v1.1)
+
+The Runs Explorer provides first-class observability into the `runs/` directory artifacts.
+
+### 1. Normalized Indexing
+The system scans `runs/` and derives a normalized status for each row using the following precedence:
+- **`failed`**: `run_summary.json` exists and reports failure.
+- **`completed`**: `run_summary.json` exists and reports success.
+- **`running`**: `runtime_state.json` reports running.
+- **`interrupted`**: `runtime_state.json` reports interrupted (manual/crash).
+- **`queued`**: `runtime_state.json` reports queued.
+
+### 2. Detail Inspection
+The explorer allows interactive drill-down into a specific run ID, fetching three core artifacts:
+- **Manifest**: To verify the launch intent (task, model, source).
+- **Runtime State**: To track lifecycle (PID, timestamps).
+- **Summary**: To inspect terminal evidence (errors, metrics).
+
+### 3. API Surface
+- `GET /api/runs`: Normalized list with status and basic metadata.
+- `GET /api/runs/{exp_id}`: Side-by-side JSON payloads for forensic analysis.
