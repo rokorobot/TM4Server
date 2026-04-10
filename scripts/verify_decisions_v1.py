@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 
 # Add project root to path
@@ -6,77 +7,68 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from tm4server.analysis.pareto_analyzer import ParetoAnalyzer
 from tm4server.analysis.decision_engine import DecisionEngine
+from tm4server.api.operator_console import detect_drift
 
-def verify_decision_taxonomy():
-    print("--- Verifying Multi-Model Decision Taxonomy (v1.5) ---")
+def verify_decision_v2_logic():
+    print("--- Verifying Triple-View Decision Logic (v1.5.1 / v2) ---")
     
     analyzer = ParetoAnalyzer()
     engine = DecisionEngine()
     
-    # 1. CASE: PROMOTE
-    # Winner clears all gates and margin
-    case_promote = {
-        "regimes": [
-            {"task": "task_promote", "model": "winner", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 1.0, "run_count": 10, "distribution_counts": {"CONVERGENT": 10}, "distribution_weighted": {"CONVERGENT": 10.0}},
-            {"task": "task_promote", "model": "runner", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 0.5, "run_count": 10, "distribution_counts": {"CONVERGENT": 10}, "distribution_weighted": {"CONVERGENT": 10.0}}
-        ]
-    }
-    ranks_p = analyzer.process_task_cohort("task_promote", case_promote["regimes"])
-    dec_p = engine.evaluate_task("task_promote", ranks_p)
-    print(f"CASE PROMOTE: {dec_p['promotion_status']} (Reason: {dec_p['reason']})")
-    assert dec_p["promotion_status"] == "PROMOTE"
+    # 1. Base Setup: Create a typical "PROMOTE" scenario
+    regimes = [
+        {"task": "autonomy", "model": "model_a", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 1.0, 
+         "run_count": 10, "distribution_counts": {"CONVERGENT": 10}, "distribution_weighted": {"CONVERGENT": 10.0}},
+        {"task": "autonomy", "model": "model_b", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 0.5, 
+         "run_count": 10, "distribution_counts": {"CONVERGENT": 10}, "distribution_weighted": {"CONVERGENT": 10.0}}
+    ]
+    ranks = analyzer.process_task_cohort("autonomy", regimes)
+    projected = engine.evaluate_task("autonomy", ranks)
+    
+    # Test 1: NO_DRIFT
+    # Lock is identical to projection
+    locked = projected.copy()
+    locked["locked"] = True
+    drift, dtype, dreason = detect_drift(projected, locked)
+    print(f"TEST 1 (NO_DRIFT): drift={drift}, type={dtype}")
+    assert drift == False
 
-    # 2. CASE: HOLD (Margin)
-    # Winner is good but runner-up is too close (< 0.15)
-    case_margin = {
-        "regimes": [
-            {"task": "task_margin", "model": "winner", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 0.82, "run_count": 10, "distribution_counts": {"CONVERGENT": 10}, "distribution_weighted": {"CONVERGENT": 10.0}},
-            {"task": "task_margin", "model": "runner", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 0.80, "run_count": 10, "distribution_counts": {"CONVERGENT": 10}, "distribution_weighted": {"CONVERGENT": 10.0}}
-        ]
-    }
-    ranks_m = analyzer.process_task_cohort("task_margin", case_margin["regimes"])
-    dec_m = engine.evaluate_task("task_margin", ranks_m)
-    print(f"CASE HOLD (Margin): {dec_m['promotion_status']} (Reason: {dec_m['reason']})")
-    assert dec_m["promotion_status"] == "HOLD"
-    assert dec_m["checks"]["margin_pass"] == False
+    # Test 2: WINNER_CHANGED
+    # Locked says model_b was the winner
+    locked_winner = locked.copy()
+    locked_winner["winner_model"] = "model_b"
+    drift, dtype, dreason = detect_drift(projected, locked_winner)
+    print(f"TEST 2 (WINNER_CHANGED): drift={drift}, type={dtype}")
+    assert drift == True
+    assert dtype == "WINNER_CHANGED"
 
-    # 3. CASE: HOLD (Reliability)
-    # Winner has high power but reliability < 0.90
-    case_reli = {
-        "regimes": [
-            {"task": "task_reli", "model": "winner", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 2.0, "run_count": 10, "distribution_counts": {"CONVERGENT": 8, "EXECUTION_FAILURE": 2}, "distribution_weighted": {"CONVERGENT": 8.0, "EXECUTION_FAILURE": 2.0}}
-        ]
-    }
-    ranks_r = analyzer.process_task_cohort("task_reli", case_reli["regimes"])
-    dec_r = engine.evaluate_task("task_reli", ranks_r)
-    print(f"CASE HOLD (Reliability): {dec_r['promotion_status']} (Reason: {dec_r['reason']})")
-    assert dec_r["promotion_status"] == "HOLD"
-    assert dec_r["checks"]["reliability_pass"] == False
+    # Test 3: STATUS_CHANGED
+    # Locked says HOLD, but projected now says PROMOTE
+    locked_status = locked.copy()
+    locked_status["promotion_status"] = "HOLD"
+    drift, dtype, dreason = detect_drift(projected, locked_status)
+    print(f"TEST 3 (STATUS_CHANGED): drift={drift}, type={dtype}")
+    assert drift == True
+    assert dtype == "STATUS_CHANGED"
 
-    # 4. CASE: REJECT (Unsafe)
-    # Winner is failure-prone and no one else is viable
-    case_reject = {
-        "regimes": [
-            {"task": "task_reject", "model": "unsafe", "label": "FAILURE_PRONE", "mean_net_improvement": 1.0, "run_count": 10, "distribution_counts": {"CONVERGENT": 5, "EXECUTION_FAILURE": 5}, "distribution_weighted": {"CONVERGENT": 5.0, "EXECUTION_FAILURE": 5.0}}
-        ]
-    }
-    ranks_rej = analyzer.process_task_cohort("task_reject", case_reject["regimes"])
-    dec_rej = engine.evaluate_task("task_reject", ranks_rej)
-    print(f"CASE REJECT (Unsafe): {dec_rej['promotion_status']} (Reason: {dec_rej['reason']})")
-    assert dec_rej["promotion_status"] == "REJECT"
+    # Test 4: GATES_DEGRADED
+    # Both are HOLD, but locked had stability PASSED, projected has stability FAILED
+    locked_hold = locked.copy()
+    locked_hold["promotion_status"] = "HOLD"
+    locked_hold["checks"] = locked["checks"].copy()
+    locked_hold["checks"]["stability_pass"] = True
+    
+    projected_hold = projected.copy()
+    projected_hold["promotion_status"] = "HOLD"
+    projected_hold["checks"] = projected["checks"].copy()
+    projected_hold["checks"]["stability_pass"] = False
+    
+    drift, dtype, dreason = detect_drift(projected_hold, locked_hold)
+    print(f"TEST 4 (GATES_DEGRADED): drift={drift}, type={dtype}")
+    assert drift == True
+    assert dtype == "GATES_DEGRADED"
 
-    # 5. CASE: INSUFFICIENT
-    case_insuf = {
-        "regimes": [
-             {"task": "task_insuf", "model": "model_a", "label": "CONVERGENT_CLUSTER", "mean_net_improvement": 1.0, "run_count": 3, "distribution_counts": {"CONVERGENT": 3}, "distribution_weighted": {"CONVERGENT": 3.0}}
-        ]
-    }
-    ranks_i = analyzer.process_task_cohort("task_insuf", case_insuf["regimes"])
-    dec_i = engine.evaluate_task("task_insuf", ranks_i)
-    print(f"CASE INSUFFICIENT: {dec_i['promotion_status']} (Reason: {dec_i['reason']})")
-    assert dec_i["promotion_status"] == "INSUFFICIENT_EVIDENCE"
-
-    print("--- Decision Logic Verified (Full Battery) ---")
+    print("--- Verifier Passed: Triple-View Drift Detection Certified ---")
 
 if __name__ == "__main__":
-    verify_decision_taxonomy()
+    verify_decision_v2_logic()

@@ -371,34 +371,88 @@ async def get_pareto_analysis():
         )
 
 @router.get("/analysis/decisions")
-async def get_projected_decisions():
-    """Calculates current 'Projected Decisions' for all tasks without persisting."""
+async def get_decisions_v2():
+    """Calculates authoritative 'Triple-View' decisions (Projected, Locked, Effective)."""
     try:
         report = state.build_regime_index(RUNS_DIR)
         pareto = ParetoAnalyzer().analyze_report(report)
         engine = DecisionEngine()
         
-        decisions = {}
+        # 1. Compute Projected Decisions
+        projected_map = {}
         for task, ranks in pareto.get("tasks", {}).items():
-            decisions[task] = engine.evaluate_task(task, ranks)
+            projected_map[task] = engine.evaluate_task(task, ranks)
+            
+        # 2. Load Locked Decisions
+        locked_map = {}
+        if DECISIONS_DIR.exists():
+            for f in DECISIONS_DIR.glob("*.json"):
+                try:
+                    locked_data = json.loads(f.read_text(encoding="utf-8"))
+                    locked_map[locked_data["task"]] = locked_data
+                except Exception:
+                    continue
+        
+        # 3. Build Triple-View Report
+        all_tasks = set(projected_map.keys()) | set(locked_map.keys())
+        tasks_report = {}
+        
+        for task in all_tasks:
+            proj = projected_map.get(task)
+            lock = locked_map.get(task)
+            
+            has_locked = lock is not None
+            has_drift, drift_type, drift_reason = detect_drift(proj, lock)
+            
+            effective = lock if has_locked else proj
+            
+            tasks_report[task] = {
+                "projected": proj,
+                "locked": lock,
+                "effective": effective,
+                "has_locked": has_locked,
+                "has_drift": has_drift,
+                "drift_type": drift_type,
+                "drift_reason": drift_reason
+            }
             
         return {
             "ok": True, 
             "report": {
-                "version": engine.VERSION,
-                "decisions": decisions
+                "version": "v2",
+                "generated_at": utc_now_iso(),
+                "tasks": tasks_report
             }
         }
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={"ok": False, "error": {"code": "DECISION_ERROR", "message": str(e)}}
-        )
+        raise HTTPException(status_code=500, detail={"ok": False, "error": {"code": "DECISION_ERROR", "message": str(e)}})
 
 @router.post("/tasks/{task}/decide")
-async def lock_task_decision(task: str):
-    """Computes and PERSISTS a formal governance decision for a task."""
+async def lock_task_decision(task: str, force: bool = Query(False)):
+    """Computes and PERSISTS a formal governance decision for a task. Requires force=true to overwrite."""
     try:
+        decision_path = DECISIONS_DIR / f"{task}.json"
+        existing_locked = None
+        if decision_path.exists():
+            if not force:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "ok": False,
+                        "error": {
+                            "code": "DECISION_ALREADY_LOCKED",
+                            "message": "A locked decision already exists for this task. Re-submit with force=true to overwrite.",
+                            "task": task,
+                            "existing_path": str(decision_path)
+                        }
+                    }
+                )
+            # Load lineage
+            try:
+                existing_locked = json.loads(decision_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
         # 1. Compute current projected decision
         report = state.build_regime_index(RUNS_DIR)
         pareto = ParetoAnalyzer().analyze_report(report)
@@ -410,13 +464,44 @@ async def lock_task_decision(task: str):
         engine = DecisionEngine()
         decision = engine.evaluate_task(task, ranks)
         
-        # 2. Persist to decisions/{task}.json
-        decision_path = DECISIONS_DIR / f"{task}.json"
+        # 2. Upgrade to Locked Artifact
+        decision["locked"] = True
+        decision["locked_at"] = utc_now_iso()
+        decision["decision_path"] = str(decision_path)
+        if existing_locked:
+            decision["previous_locked_at"] = existing_locked.get("locked_at")
+
+        # 3. Persist
         atomic_write_json(decision_path, decision)
         
         return {"ok": True, "decision": decision, "path": str(decision_path)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail={"ok": False, "error": {"code": "DECISION_LOCK_ERROR", "message": str(e)}}
         )
+
+def detect_drift(projected, locked):
+    """Detects tier-based governance drift between live evidence and locked decisions."""
+    if not locked or not projected:
+        return False, "NO_DRIFT", None
+    
+    if projected.get("winner_model") != locked.get("winner_model"):
+        return True, "WINNER_CHANGED", f"Projected winner {projected.get('winner_model')} differs from locked."
+    
+    if projected.get("promotion_status") != locked.get("promotion_status"):
+        return True, "STATUS_CHANGED", f"Projected status {projected.get('promotion_status')} differs from locked."
+        
+    # Check gate degradation
+    p_checks = projected.get("checks", {})
+    l_checks = locked.get("checks", {})
+    gates = ["reliability_pass", "stability_pass", "margin_pass", "governance_clear"]
+    for g in gates:
+        if l_checks.get(g) and not p_checks.get(g):
+            return True, "GATES_DEGRADED", f"Gate {g} no longer passing in live evidence."
+        if not l_checks.get(g) and p_checks.get(g):
+            return True, "GATES_IMPROVED", f"Gate {g} now passing in live evidence."
+
+    return False, "NO_DRIFT", None

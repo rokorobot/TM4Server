@@ -104,15 +104,19 @@ class DecisionEngine:
                        reason: str = "") -> Dict[str, Any]:
         """Helper to construct the decision artifact schema."""
         decision = {
-            "decision_version": self.VERSION,
+            "decision_version": "v1.5.1",
             "task": task,
             "promotion_status": status,
             "reason": reason,
-            "locked_at": utc_now_iso(),
+            "locked": False,
+            "evaluated_at": utc_now_iso(),
             "thresholds_used": self.THRESHOLDS
         }
         
         if winner:
+            # Determine if penalty was applied based on label
+            penalty_applied = winner["label"] in ["FAILURE_PRONE", "NOISY_REGIME"]
+            
             decision.update({
                 "winner_model": winner["model"],
                 "winner_score": winner["score"],
@@ -122,7 +126,11 @@ class DecisionEngine:
                     "power": winner["power"],
                     "yield": winner["yield"],
                     "stability": winner["stability"],
-                    "reliability": winner["reliability"]
+                    "reliability": winner["reliability"],
+                    "score": winner["score"],
+                    "base_score": winner.get("base_score", winner["score"]),
+                    "penalty_applied": penalty_applied,
+                    "reason": winner.get("reason", "")
                 }
             })
             
