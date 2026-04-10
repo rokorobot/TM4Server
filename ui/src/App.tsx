@@ -64,6 +64,8 @@ interface RunInfo {
   has_results: boolean;
   has_stdout: boolean;
   has_stderr: boolean;
+  classification_label?: 'EXECUTION_FAILURE' | 'SATURATED' | 'UNSTABLE' | 'CONVERGENT' | 'SIGNAL_ABSENT' | 'UNCLASSIFIED';
+  classification_confidence?: number;
 }
 
 interface RunDetail {
@@ -71,6 +73,7 @@ interface RunDetail {
   manifest: any;
   runtime_state: any;
   summary: any;
+  classification: any;
 }
 
 interface SystemInfo {
@@ -123,6 +126,25 @@ function StatusBadge({ status }: { status: RunInfo['status'] }) {
   );
 }
 
+function ScientificBadge({ label }: { label: RunInfo['classification_label'] }) {
+  if (!label) return <span className="text-[10px] font-bold text-zinc-700 uppercase tracking-tighter">—</span>;
+  
+  const styles = {
+    EXECUTION_FAILURE: 'border-red-900 bg-red-950/40 text-red-500',
+    SATURATED: 'border-purple-700/50 bg-purple-950/20 text-purple-400',
+    UNSTABLE: 'border-orange-700/50 bg-orange-950/20 text-orange-400',
+    CONVERGENT: 'border-cyan-700/50 bg-cyan-950/20 text-cyan-400',
+    SIGNAL_ABSENT: 'border-zinc-700 bg-zinc-800/30 text-zinc-500',
+    UNCLASSIFIED: 'border-zinc-800 bg-zinc-900 text-zinc-600',
+  };
+  
+  return (
+    <span className={`rounded border px-2 py-0.5 text-[9px] font-black uppercase tracking-tight ${styles[label] || styles.UNCLASSIFIED}`}>
+      {label.replace('_', ' ')}
+    </span>
+  );
+}
+
 function JsonView({ title, data }: { title: string; data: any }) {
   return (
     <div className="flex flex-col gap-2">
@@ -130,6 +152,15 @@ function JsonView({ title, data }: { title: string; data: any }) {
       <pre className="max-h-[200px] overflow-auto rounded-xl bg-zinc-950/80 p-3 font-mono text-[10px] text-zinc-300 shadow-inner">
         {JSON.stringify(data, null, 2)}
       </pre>
+    </div>
+  );
+}
+
+function EvidenceItem({ label, value, unit = '' }: { label: string; value: any; unit?: string }) {
+  return (
+    <div className="flex justify-between border-b border-zinc-900 pb-1">
+      <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-600">{label}</span>
+      <span className="text-[10px] font-mono font-medium text-zinc-300">{value ?? '--'}{unit}</span>
     </div>
   );
 }
@@ -284,6 +315,23 @@ export default function App() {
       setRunDetail(data.detail);
     } catch (e: any) {
       console.error(e);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const handleClassify = async (expId: string) => {
+    setDetailLoading(true);
+    try {
+      await fetchJson(`/api/runs/${expId}/classify`, { method: 'POST' });
+      // Refresh detail and list
+      const data = await fetchJson(`/api/runs/${expId}`);
+      setRunDetail(data.detail);
+      const r = await fetchJson('/api/runs?limit=100');
+      setRuns(r.items);
+    } catch (e: any) {
+      console.error(e);
+      alert(`Classification failed: ${e.message}`);
     } finally {
       setDetailLoading(false);
     }
@@ -481,6 +529,7 @@ export default function App() {
                     <tr>
                       <th className="px-6 py-4">EXP ID</th>
                       <th className="px-6 py-4">Status</th>
+                      <th className="px-6 py-4">Interpretation</th>
                       <th className="px-6 py-4">Created</th>
                       <th className="px-6 py-4 text-center">Artifacts</th>
                       <th className="px-6 py-4 text-right">Actions</th>
@@ -492,6 +541,7 @@ export default function App() {
                         <tr className={`hover:bg-zinc-900/20 cursor-pointer ${selectedRunId === r.exp_id ? 'bg-zinc-900/40 border-l-2 border-blue-500' : ''}`} onClick={() => toggleRunDetail(r.exp_id)}>
                           <td className="whitespace-nowrap px-6 py-3 font-mono font-bold text-zinc-100">{r.exp_id}</td>
                           <td className="px-6 py-3"><StatusBadge status={r.status} /></td>
+                          <td className="px-6 py-3"><ScientificBadge label={r.classification_label} /></td>
                           <td className="whitespace-nowrap px-6 py-3 font-mono text-[11px] text-zinc-500">{r.created_at}</td>
                           <td className="px-6 py-3 text-center">
                             <div className="flex justify-center gap-2">
@@ -511,11 +561,50 @@ export default function App() {
                                   <Loader2 className="h-6 w-6 animate-spin text-zinc-600" />
                                 </div>
                               ) : runDetail ? (
-                                <div className="grid gap-6 md:grid-cols-3">
+                                <div className="grid gap-6 md:grid-cols-4">
                                   <JsonView title="Manifest (Launch Intent)" data={runDetail.manifest} />
                                   <JsonView title="Runtime State (Lifecycle)" data={runDetail.runtime_state} />
                                   <JsonView title="Run Summary (Evidence)" data={runDetail.summary} />
-                                  <div className="md:col-span-3 flex justify-between items-center pt-4 border-t border-zinc-800">
+                                  
+                                  {/* Classification Pane */}
+                                  <div className="flex flex-col gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
+                                    <div className="flex items-center justify-between">
+                                      <div className="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Interpretation</div>
+                                      {runDetail.classification && (
+                                        <div className="text-[10px] font-black text-cyan-500">{Math.round(runDetail.classification.confidence * 100)}% Match</div>
+                                      )}
+                                    </div>
+                                    
+                                    {runDetail.classification ? (
+                                      <>
+                                        <div className="mt-1">
+                                          <ScientificBadge label={runDetail.classification.label} />
+                                        </div>
+                                        <div className="text-[11px] font-medium leading-relaxed text-zinc-300">
+                                          {runDetail.classification.reason}
+                                        </div>
+                                        <div className="mt-2 space-y-1">
+                                          <EvidenceItem label="Net Improvement" value={runDetail.classification.evidence.net_improvement} />
+                                          <EvidenceItem label="Signal Density" value={runDetail.classification.evidence.improvement_density} />
+                                          <EvidenceItem label="Late Variance" value={runDetail.classification.evidence.late_variance} />
+                                          <EvidenceItem label="Violations" value={runDetail.classification.evidence.violation_rate} unit="%" />
+                                        </div>
+                                      </>
+                                    ) : (
+                                      <div className="flex flex-1 flex-col items-center justify-center gap-2 py-4">
+                                        <div className="text-[10px] text-zinc-600 italic">No scientific label assigned</div>
+                                        <button 
+                                          onClick={(e) => { e.stopPropagation(); handleClassify(r.exp_id); }}
+                                          disabled={r.status === 'queued' || r.status === 'running' || !r.has_summary}
+                                          className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-1.5 text-[10px] font-black uppercase text-zinc-300 transition hover:bg-zinc-800 disabled:opacity-20"
+                                        >
+                                          Classify Run
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="md:col-span-4 flex justify-between items-center pt-4 border-t border-zinc-800">
                                       <span className="text-[10px] font-bold uppercase text-zinc-600 flex items-center gap-2">
                                         Logs: {r.has_stdout ? <span className="text-zinc-400 underline cursor-pointer hover:text-white">stdout.log</span> : 'none'}
                                       </span>

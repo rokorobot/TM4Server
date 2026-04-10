@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query
 import json
 
-from ..state import StateManager, atomic_write_json, utc_now_iso, git_short_commit
+from ..state import StateManager, atomic_write_json, utc_now_iso, git_short_commit, read_json_strict
 from ..config import TM4_RUNTIME_ROOT, TM4SERVER_REPO_ROOT, TM4CORE_REPO_ROOT, RUNS_DIR
+from ..analysis.classifier import ExperimentClassifier
 
 router = APIRouter(tags=["Operator Console"])
 
@@ -259,4 +260,69 @@ async def get_run_detail(exp_id: str):
                     "message": str(e)
                 }
             }
+        )
+@router.post("/runs/{exp_id}/classify")
+async def classify_run(exp_id: str):
+    """Triggers deterministic semantic interpretation of a run based on terminal evidence."""
+    try:
+        run_dir = RUNS_DIR / exp_id
+        if not run_dir.exists():
+             raise FileNotFoundError(f"Run directory not found: {exp_id}")
+             
+        summary_path = run_dir / "run_summary.json"
+        if not summary_path.exists():
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "ok": False,
+                    "error": {
+                        "code": "MISSING_EVIDENCE",
+                        "message": "Scientific classification requires a terminal run_summary.json"
+                    }
+                }
+            )
+            
+        summary = read_json_strict(summary_path)
+        
+        # Initialize engine and interpret
+        classifier = ExperimentClassifier()
+        result = classifier.classify(summary)
+        
+        # Save structurally self-describing artifact
+        atomic_write_json(run_dir / "classification.json", result)
+        
+        return {"ok": True, "classification": result.get("classification")}
+        
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": str(e)}}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": {"code": "CLASSIFY_ERROR", "message": str(e)}}
+        )
+
+@router.get("/runs/{exp_id}/classification")
+async def get_run_classification(exp_id: str):
+    """Returns previous scientific classification artifact if it exists."""
+    try:
+        run_dir = RUNS_DIR / exp_id
+        path = run_dir / "classification.json"
+        
+        if not path.exists():
+             return {
+                 "ok": True, 
+                 "classification": None, 
+                 "message": "Run not yet classified."
+             }
+             
+        data = read_json_strict(path)
+        return {"ok": True, "classification": data.get("classification")}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": {"code": "CLASSIFICATION_FETCH_ERROR", "message": str(e)}}
         )

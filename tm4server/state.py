@@ -442,10 +442,16 @@ class StateManager:
             elif state.get("status") == "queued":
                 status = "queued"
             
-            # 3. Normalized Row
+            # 3. Read Classification (Cached)
+            classification_data = read_json_safe(d / "classification.json", {})
+            classification = classification_data.get("classification", {})
+            
+            # 4. Normalized Row
             run = {
                 "exp_id": d.name,
                 "status": status,
+                "classification_label": classification.get("label"),
+                "classification_confidence": classification.get("confidence"),
                 "created_at": manifest.get("created_at") or manifest.get("submitted_at"),
                 "started_at": state.get("started_at"),
                 "completed_at": summary.get("ts_utc") or state.get("completed_at") or state.get("failed_at"),
@@ -478,5 +484,6 @@ class StateManager:
             "exp_id": exp_id,
             "manifest": read_json_safe(run_dir / "run_manifest.json", {}),
             "runtime_state": read_json_safe(run_dir / "runtime_state.json", {}),
-            "summary": read_json_safe(run_dir / "run_summary.json", {})
+            "summary": read_json_safe(run_dir / "run_summary.json", {}),
+            "classification": read_json_safe(run_dir / "classification.json", {}).get("classification")
         }
