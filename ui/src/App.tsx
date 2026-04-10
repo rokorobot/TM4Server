@@ -9,7 +9,10 @@ import {
   Play, 
   Pause, 
   Square,
-  Server
+  Server,
+  Zap,
+  Clock,
+  CheckCircle
 } from 'lucide-react';
 
 const POLL_INTERVAL = 3000;
@@ -26,6 +29,11 @@ interface StatusInfo {
   current_exp_id: string | null;
   queue_depth: number;
   last_completed_exp_id: string | null;
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  interrupted: number;
 }
 
 interface ControlInfo {
@@ -93,8 +101,12 @@ export default function App() {
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [systemErr, setSystemErr] = useState<ApiError | null>(null);
 
-  const fetchJson = async (path: string) => {
-    const resp = await fetch(path);
+  const [launchInFlight, setLaunchInFlight] = useState(false);
+  const [lastLaunchId, setLastLaunchId] = useState<string | null>(null);
+  const [launchErr, setLaunchErr] = useState<ApiError | null>(null);
+
+  const fetchJson = async (path: string, options?: RequestInit) => {
+    const resp = await fetch(path, options);
     const data = await resp.json();
     if (!data.ok) {
       throw data.error || { code: 'UNKNOWN_ERROR', message: 'An unexpected error occurred' };
@@ -173,6 +185,23 @@ export default function App() {
     }
   };
 
+  const handleLaunch = async () => {
+    setLaunchInFlight(true);
+    setLaunchErr(null);
+    setLastLaunchId(null);
+    try {
+      const data = await fetchJson('/api/runs/launch', { method: 'POST' });
+      setLastLaunchId(data.exp_id);
+      await refreshData();
+      // Auto-clear success message after 10s
+      setTimeout(() => setLastLaunchId(prev => prev === data.exp_id ? null : prev), 10000);
+    } catch (e: any) {
+      setLaunchErr(e);
+    } finally {
+      setLaunchInFlight(false);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 md:px-6">
       <header className="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-center">
@@ -216,9 +245,23 @@ export default function App() {
               <div className="text-[10px] font-bold uppercase tracking-[0.2em] opacity-60">Engine State</div>
               <div className="mt-1 text-xl font-black uppercase tracking-tight">{status?.runtime_state ?? 'Unknown'}</div>
             </div>
-            <StatItem label="Experiment ID" value={status?.current_exp_id ?? 'None'} />
-            <StatItem label="Queue Depth" value={status?.queue_depth ?? 0} />
+            <StatItem label="Active ID" value={status?.current_exp_id ?? 'None'} />
+            <StatItem label="Pending" value={status?.pending ?? 0} />
             <StatItem label="Last Completed" value={status?.last_completed_exp_id ?? 'None'} />
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-3 grid grid-cols-3 gap-2">
+               <div className="flex flex-col items-center">
+                  <span className="text-[8px] font-bold text-zinc-600 uppercase">Succ</span>
+                  <span className="text-xs font-bold text-emerald-500">{status?.completed ?? 0}</span>
+               </div>
+               <div className="flex flex-col items-center border-x border-zinc-800">
+                  <span className="text-[8px] font-bold text-zinc-600 uppercase">Fail</span>
+                  <span className="text-xs font-bold text-red-500">{status?.failed ?? 0}</span>
+               </div>
+               <div className="flex flex-col items-center">
+                  <span className="text-[8px] font-bold text-zinc-600 uppercase">Intr</span>
+                  <span className="text-xs font-bold text-amber-500">{status?.interrupted ?? 0}</span>
+               </div>
+            </div>
           </div>
           {statusErr && <ErrorBanner error={statusErr} />}
         </section>
@@ -264,6 +307,29 @@ export default function App() {
             </div>
             {controlActionErr && <ErrorBanner error={controlActionErr} />}
             {controlErr && <ErrorBanner error={controlErr} />}
+            
+            <div className="mt-4 pt-4 border-t border-zinc-900">
+              <button
+                onClick={handleLaunch}
+                disabled={launchInFlight}
+                className="w-full flex items-center justify-center gap-2 rounded-2xl bg-zinc-100 py-4 text-sm font-black text-zinc-950 transition hover:bg-white disabled:opacity-50"
+              >
+                {launchInFlight ? <Clock className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4 fill-zinc-950" />}
+                LAUNCH EXPERIMENT
+              </button>
+              
+              {lastLaunchId && (
+                <div className="mt-3 flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-bold">
+                  <CheckCircle className="h-3 w-3" />
+                  Queued: {lastLaunchId}
+                </div>
+              )}
+              {launchErr && (
+                <div className="mt-3">
+                  <ErrorBanner error={launchErr} />
+                </div>
+              )}
+            </div>
           </div>
         </section>
 

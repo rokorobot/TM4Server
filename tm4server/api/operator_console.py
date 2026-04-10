@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Query
 import json
 
-from ..state import StateManager
-from ..config import TM4_RUNTIME_ROOT, TM4SERVER_REPO_ROOT, TM4CORE_REPO_ROOT
+from ..state import StateManager, atomic_write_json, utc_now_iso, git_short_commit
+from ..config import TM4_RUNTIME_ROOT, TM4SERVER_REPO_ROOT, TM4CORE_REPO_ROOT, RUNS_DIR
 
 router = APIRouter(tags=["Operator Console"])
 
@@ -19,6 +19,9 @@ async def get_status():
     """Returns current runtime status."""
     try:
         status_data = state.read_status()
+        # Enrich status with live workload metrics from runs/
+        workload = state.get_workload_summary(RUNS_DIR)
+        status_data.update(workload)
         return {"ok": True, "status": status_data}
     except json.JSONDecodeError:
         raise HTTPException(
@@ -143,3 +146,70 @@ async def get_version():
         "instance_id": status.get("instance_id", "unknown"),
         "runtime_root": str(TM4_RUNTIME_ROOT)
     }
+
+@router.post("/runs/launch")
+async def launch_run():
+    """Allocates a new experiment ID, creates the environment, and queues the workload."""
+    try:
+        exp_id = state.allocate_next_exp_id(RUNS_DIR)
+        run_dir = RUNS_DIR / exp_id
+        
+        created_at = utc_now_iso()
+        
+        # 1. Immutable Launch Intent
+        manifest = {
+            "schema_version": 1,
+            "exp_id": exp_id,
+            "experiment_id": exp_id, # for backward compatibility
+            "task": "autonomy",
+            "model": "default",
+            "created_at": created_at,
+            "submitted_at": created_at,
+            "requested_by": "operator_console",
+            "tm4server_version": git_short_commit(TM4SERVER_REPO_ROOT) if TM4SERVER_REPO_ROOT else None,
+            "status": "queued"
+        }
+        atomic_write_json(run_dir / "run_manifest.json", manifest)
+        
+        # 2. Live Execution State
+        runtime_state = {
+            "status": "queued",
+            "created_at": created_at,
+            "updated_at": created_at
+        }
+        atomic_write_json(run_dir / "runtime_state.json", runtime_state)
+        
+        # Trigger an immediate status update so the UI sees the new pending count
+        # In a real system, we'd wait for a poll, but for a better UX we can write status now
+        try:
+            current_status = state.read_status()
+            workload = state.get_workload_summary(RUNS_DIR)
+            current_status.update(workload)
+            state.write_status(
+                runtime_state=current_status.get("runtime_state", "idle"),
+                current_exp_id=current_status.get("current_exp_id"),
+                queue_depth=workload.get("pending", 0),
+                last_completed_exp_id=current_status.get("last_completed_exp_id"),
+                extra=current_status.get("extra")
+            )
+        except Exception:
+            pass # Non-critical if pre-emptive status update fails
+
+        return {
+            "ok": True,
+            "status": "queued",
+            "exp_id": exp_id,
+            "run_dir": str(run_dir)
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "LAUNCH_FAILURE",
+                    "message": str(e)
+                }
+            }
+        )

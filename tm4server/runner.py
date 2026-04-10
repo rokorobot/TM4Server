@@ -20,75 +20,88 @@ from .runtime import run_experiment, _emit_event
 
 
 def init_dirs() -> None:
-    for d in [QUEUED_DIR, RUNNING_DIR, COMPLETED_DIR, FAILED_DIR, RUNS_DIR]:
+    for d in [RUNS_DIR]:
         ensure_dir(d)
 
 
-def next_manifest_file() -> Path | None:
-    if not QUEUED_DIR.exists():
-        return None
-    files = sorted(QUEUED_DIR.glob("*.json"))
-    return files[0] if files else None
+# next_manifest_file is deprecated in favor of StateManager.get_next_pending_run
 
 
-def process_one(state_manager: StateManager | None = None) -> bool:
-    manifest_file = next_manifest_file()
-    if manifest_file is None:
+def process_one(run_dir: Path, state_manager: StateManager | None = None) -> bool:
+    """Processes a single run directory by executing the autonomy loop."""
+    manifest_path = run_dir / "run_manifest.json"
+    state_file = run_dir / "runtime_state.json"
+    
+    if not manifest_path.exists():
         return False
 
-    running_manifest = RUNNING_DIR / manifest_file.name
-    shutil.move(str(manifest_file), str(running_manifest))
-
-    manifest = read_json(running_manifest)
-    exp_id = manifest["experiment_id"]
-    run_dir = RUNS_DIR / exp_id
-    ensure_dir(run_dir)
-
-    # Required output files for each run
-    write_json(run_dir / "manifest.json", manifest)
+    manifest = read_json(manifest_path)
+    exp_id = manifest.get("exp_id") or manifest.get("experiment_id")
     
-    write_json(CURRENT_RUN_FILE, {
-        "experiment_id": exp_id,
-        "ts_utc": utc_now_iso(),
-        "manifest_file": str(running_manifest),
-    })
+    # 1. Update State to Running
+    runtime_state = {
+        "status": "running",
+        "worker_pid": os.getpid(),
+        "started_at": utc_now_iso(),
+        "updated_at": utc_now_iso()
+    }
+    write_json(state_file, runtime_state)
     
+    # Update global state for visibility
     if state_manager:
         state_manager.write_status(
             runtime_state="running",
             current_exp_id=exp_id,
+            queue_depth=state_manager.get_workload_summary(RUNS_DIR).get("pending", 0)
         )
 
+    # 2. Setup environment
+    write_json(CURRENT_RUN_FILE, {
+        "experiment_id": exp_id,
+        "ts_utc": utc_now_iso(),
+        "run_dir": str(run_dir),
+    })
+    
     stdout_log = run_dir / "stdout.log"
+    stderr_log = run_dir / "stderr.log"
 
     try:
-        append_line(stdout_log, f"[{utc_now_iso()}] Runner picked job")
+        append_line(stdout_log, f"[{utc_now_iso()}] Runner picked job: {exp_id}")
         
         # Executes experiment (writes results.json internally)
+        # Note: runtime.py also manages aggregation and reports in its finally block
         results = run_experiment(run_dir, manifest)
 
-        # runtime.py already writes status.json and results.json
-        shutil.move(str(running_manifest), str(COMPLETED_DIR / running_manifest.name))
-        _emit_event(run_dir / "event_log.jsonl", "manifest_moved_completed", destination="completed")
-
+        # 3. Terminal Success
+        runtime_state["status"] = "completed"
+        runtime_state["completed_at"] = utc_now_iso()
+        runtime_state["updated_at"] = utc_now_iso()
+        write_json(state_file, runtime_state)
+        
         return True
 
     except Exception as e:
         append_line(stdout_log, f"[{utc_now_iso()}] ERROR: {e}")
-        append_line(stdout_log, traceback.format_exc())
+        append_line(stderr_log, f"[{utc_now_iso()}] " + traceback.format_exc())
 
-        # Only write status.json here if runtime.py failed before writing its own
-        status_path = run_dir / "status.json"
-        if not status_path.exists():
-            write_json(status_path, {
-                "experiment_id": exp_id,
-                "status": "failed",
-                "preflight_status": "unknown",
-                "error": str(e),
-                "ts_utc": utc_now_iso(),
-            })
-
-        shutil.move(str(running_manifest), str(FAILED_DIR / running_manifest.name))
-        _emit_event(run_dir / "event_log.jsonl", "manifest_moved_failed", error=str(e))
+        # 3. Terminal Failure
+        runtime_state["status"] = "failed"
+        runtime_state["failed_at"] = utc_now_iso()
+        runtime_state["updated_at"] = utc_now_iso()
+        runtime_state["error"] = str(e)
+        write_json(state_file, runtime_state)
+        
+        # Ensure a final attempt at a summary exists if runtime.py didn't reach it
+        summary_path = run_dir / "run_summary.json"
+        if not summary_path.exists():
+            try:
+                write_json(summary_path, {
+                    "experiment_id": exp_id,
+                    "status": "failed",
+                    "error": str(e),
+                    "ts_utc": utc_now_iso(),
+                })
+            except Exception:
+                pass
 
         return True
