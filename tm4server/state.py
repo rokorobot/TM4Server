@@ -487,3 +487,44 @@ class StateManager:
             "summary": read_json_safe(run_dir / "run_summary.json", {}),
             "classification": read_json_safe(run_dir / "classification.json", {}).get("classification")
         }
+
+    def build_regime_index(self, runs_dir: Path) -> dict[str, Any]:
+        """
+        Scans all runs, groups them by (task, model) regime, and 
+        returns a research-grade gradient index.
+        """
+        from .analysis.gradient_detector import GradientDetector
+        
+        if not runs_dir.exists():
+            return {"gradient_version": "v1", "generated_at": utc_now_iso(), "regimes": []}
+            
+        # Groupings: (task, model) -> list of classification blocks
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        
+        for d in runs_dir.iterdir():
+            if not d.is_dir() or not d.name.startswith("EXP"):
+                continue
+                
+            manifest_path = d / "run_manifest.json"
+            class_path = d / "classification.json"
+            
+            if not manifest_path.exists() or not class_path.exists():
+                continue
+                
+            manifest = read_json_safe(manifest_path, {})
+            class_payload = read_json_safe(class_path, {})
+            
+            task = manifest.get("task", "unknown")
+            model = manifest.get("model", "unknown")
+            classification = class_payload.get("classification")
+            
+            if not classification:
+                continue
+                
+            key = (task, model)
+            if key not in groups:
+                 groups[key] = []
+            groups[key].append(classification)
+            
+        detector = GradientDetector()
+        return detector.build_report(groups)

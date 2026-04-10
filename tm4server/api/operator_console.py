@@ -293,6 +293,8 @@ async def classify_run(exp_id: str):
         
         return {"ok": True, "classification": result.get("classification")}
         
+    except HTTPException:
+        raise
     except FileNotFoundError as e:
         raise HTTPException(
             status_code=404,
@@ -325,4 +327,22 @@ async def get_run_classification(exp_id: str):
         raise HTTPException(
             status_code=500,
             detail={"ok": False, "error": {"code": "CLASSIFICATION_FETCH_ERROR", "message": str(e)}}
+        )
+
+@router.get("/analysis/gradients")
+async def get_gradient_analysis():
+    """Returns on-demand research-grade insights by aggregating all classified runs."""
+    try:
+        report = state.build_regime_index(RUNS_DIR)
+        return {"ok": True, "report": report}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "ANALYSIS_ERROR",
+                    "message": f"Failed to compute gradient index: {str(e)}"
+                }
+            }
         )

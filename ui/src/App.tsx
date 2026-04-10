@@ -85,6 +85,24 @@ interface SystemInfo {
   ok?: boolean;
 }
 
+interface RegimeInsight {
+  regime_key: string;
+  task: string;
+  model: string;
+  label: 'CONVERGENT_CLUSTER' | 'NOISY_REGIME' | 'SATURATED_REGIME' | 'SIGNAL_ABSENT_REGIME' | 'FAILURE_PRONE' | 'INSUFFICIENT_EVIDENCE' | 'UNCLASSIFIED';
+  mean_confidence: number;
+  run_count: number;
+  distribution_counts: Record<string, number>;
+  distribution_weighted: Record<string, number>;
+  reason: string;
+}
+
+interface GradientReport {
+  gradient_version: string;
+  generated_at: string;
+  regimes: RegimeInsight[];
+}
+
 // --- Components ---
 
 function ErrorBanner({ error }: { error: ApiError }) {
@@ -140,8 +158,86 @@ function ScientificBadge({ label }: { label: RunInfo['classification_label'] }) 
   
   return (
     <span className={`rounded border px-2 py-0.5 text-[9px] font-black uppercase tracking-tight ${styles[label] || styles.UNCLASSIFIED}`}>
-      {label.replace('_', ' ')}
+      {label.replaceAll('_', ' ')}
     </span>
+  );
+}
+
+function RegimeBadge({ label }: { label: RegimeInsight['label'] }) {
+  const styles = {
+    CONVERGENT_CLUSTER: 'border-cyan-700/50 bg-cyan-950/20 text-cyan-400',
+    NOISY_REGIME: 'border-orange-700/50 bg-orange-950/20 text-orange-400',
+    SATURATED_REGIME: 'border-purple-700/50 bg-purple-950/20 text-purple-400',
+    SIGNAL_ABSENT_REGIME: 'border-zinc-700 bg-zinc-800/30 text-zinc-500',
+    FAILURE_PRONE: 'border-red-700/50 bg-red-950/20 text-red-400',
+    INSUFFICIENT_EVIDENCE: 'border-zinc-800 bg-zinc-900 text-zinc-600',
+    UNCLASSIFIED: 'border-zinc-800 bg-zinc-900 text-zinc-600',
+  };
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${styles[label] || styles.UNCLASSIFIED}`}>
+      {label.replaceAll('_', ' ')}
+    </span>
+  );
+}
+
+function DistributionBar({ counts, total }: { counts: Record<string, number>; total: number }) {
+  const colors: Record<string, string> = {
+    CONVERGENT: 'bg-cyan-500',
+    UNSTABLE: 'bg-orange-500',
+    SATURATED: 'bg-purple-500',
+    SIGNAL_ABSENT: 'bg-zinc-500',
+    EXECUTION_FAILURE: 'bg-red-500',
+    UNCLASSIFIED: 'bg-zinc-700',
+  };
+
+  return (
+    <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-zinc-900">
+      {Object.entries(counts).map(([label, count]) => (
+        <div 
+          key={label}
+          style={{ width: `${(count / total) * 100}%` }}
+          className={`${colors[label] || colors.UNCLASSIFIED} h-full transition-all`}
+          title={`${label}: ${count}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function RegimeCard({ insight }: { insight: RegimeInsight }) {
+  return (
+    <div className="flex flex-col gap-4 rounded-3xl border border-zinc-800 bg-zinc-950/50 p-6 transition hover:border-zinc-700">
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-600">Regime Evidence</div>
+          <div className="mt-1 text-lg font-black tracking-tight text-zinc-100">{insight.task} <span className="font-light text-zinc-500">/ {insight.model}</span></div>
+        </div>
+        <RegimeBadge label={insight.label} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="flex flex-col">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-700">Run Count</span>
+          <span className="text-sm font-mono font-bold text-zinc-300">{insight.run_count}</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-700">Mean Conf</span>
+          <span className="text-sm font-mono font-bold text-cyan-500">{Math.round(insight.mean_confidence * 100)}%</span>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+         <div className="flex justify-between text-[9px] font-bold uppercase text-zinc-600">
+            <span>Label Distribution (Raw)</span>
+            <span>{insight.run_count} Samples</span>
+         </div>
+         <DistributionBar counts={insight.distribution_counts} total={insight.run_count} />
+      </div>
+
+      <div className="text-xs font-medium leading-relaxed text-zinc-400">
+        {insight.reason}
+      </div>
+    </div>
   );
 }
 
@@ -195,6 +291,9 @@ export default function App() {
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
+  const [gradients, setGradients] = useState<GradientReport | null>(null);
+  const [gradientsErr, setGradientsErr] = useState<ApiError | null>(null);
+
   const fetchJson = async (path: string, options?: RequestInit) => {
     const resp = await fetch(path, options);
     const data = await resp.json();
@@ -207,7 +306,7 @@ export default function App() {
 
   const refreshData = useCallback(async () => {
     let successCount = 0;
-    const totalRequests = 5;
+    const totalRequests = 7;
 
     // Health check
     try {
@@ -255,6 +354,14 @@ export default function App() {
       setRunsErr(null);
       successCount++;
     } catch (e: any) { setRunsErr(e); }
+
+    // Gradients
+    try {
+      const g = await fetchJson('/api/analysis/gradients');
+      setGradients(g.report);
+      setGradientsErr(null);
+      successCount++;
+    } catch (e: any) { setGradientsErr(e); }
 
     // Only update "Last Refresh" if all core endpoints succeeded
     if (successCount === totalRequests) {
@@ -399,6 +506,30 @@ export default function App() {
             </div>
           </div>
           {statusErr && <ErrorBanner error={statusErr} />}
+        </section>
+
+        {/* Research Signal Section */}
+        <section className="flex flex-col gap-4 lg:col-span-2">
+          <div className="flex items-center gap-2 px-1 text-cyan-500">
+            <Zap className="h-4 w-4 fill-cyan-500" />
+            <h2 className="text-xs font-bold uppercase tracking-[0.25em]">Research Signal Gaps</h2>
+          </div>
+          
+          <div className="grid gap-6 md:grid-cols-2">
+            {gradientsErr ? (
+              <div className="md:col-span-2"><ErrorBanner error={gradientsErr} /></div>
+            ) : gradients?.regimes.length ? (
+              gradients.regimes.map((insight) => (
+                <RegimeCard key={insight.regime_key} insight={insight} />
+              ))
+            ) : (
+              <div className="md:col-span-2 flex flex-col items-center justify-center rounded-3xl border border-zinc-800 border-dashed bg-zinc-950/30 py-12 text-zinc-600">
+                <Database className="h-8 w-8 mb-3 opacity-20" />
+                <div className="text-sm font-medium">No convergent regimes detected yet.</div>
+                <div className="text-[10px] uppercase tracking-widest mt-1">Requires $N \ge 3$ classified runs per Task/Model pairing.</div>
+              </div>
+            )}
+          </div>
         </section>
 
         {/* Control Section */}
@@ -555,7 +686,7 @@ export default function App() {
                         </tr>
                         {selectedRunId === r.exp_id && (
                           <tr>
-                            <td colSpan={5} className="bg-zinc-900/30 p-6 shadow-inner animate-in fade-in slide-in-from-top-1 duration-300">
+                            <td colSpan={6} className="bg-zinc-900/30 p-6 shadow-inner animate-in fade-in slide-in-from-top-1 duration-300">
                               {detailLoading ? (
                                 <div className="flex items-center justify-center py-12">
                                   <Loader2 className="h-6 w-6 animate-spin text-zinc-600" />
@@ -622,7 +753,7 @@ export default function App() {
                         )}
                       </tbody>
                     )) : (
-                      <tr><td colSpan={5} className="px-6 py-12 text-center text-zinc-600 font-medium italic">No experiment runs found.</td></tr>
+                      <tr><td colSpan={6} className="px-6 py-12 text-center text-zinc-600 font-medium italic">No experiment runs found.</td></tr>
                     )}
                   </tbody>
                 </table>
