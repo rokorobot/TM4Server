@@ -11,8 +11,11 @@ import {
   Square,
   Server,
   Zap,
-  Clock,
-  CheckCircle
+  CheckCircle,
+  ChevronDown,
+  ChevronRight,
+  Database,
+  Loader2
 } from 'lucide-react';
 
 const POLL_INTERVAL = 3000;
@@ -45,6 +48,29 @@ interface HistoryItem {
   action: string;
   source: string;
   result: 'accepted' | 'rejected' | 'error';
+}
+
+interface RunInfo {
+  exp_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+  task: string;
+  model: string;
+  requested_by: string;
+  failure_reason?: string;
+  has_summary: boolean;
+  has_results: boolean;
+  has_stdout: boolean;
+  has_stderr: boolean;
+}
+
+interface RunDetail {
+  exp_id: string;
+  manifest: any;
+  runtime_state: any;
+  summary: any;
 }
 
 interface SystemInfo {
@@ -81,6 +107,33 @@ function StatItem({ label, value, loading }: { label: string; value: ReactNode; 
   );
 }
 
+function StatusBadge({ status }: { status: RunInfo['status'] }) {
+  const styles = {
+    queued: 'border-zinc-700 bg-zinc-800/30 text-zinc-400',
+    running: 'border-blue-700/50 bg-blue-950/20 text-blue-400 animate-pulse',
+    completed: 'border-emerald-700/50 bg-emerald-950/20 text-emerald-400',
+    failed: 'border-red-700/50 bg-red-950/20 text-red-400',
+    interrupted: 'border-amber-700/50 bg-amber-950/20 text-amber-400',
+    unknown: 'border-zinc-800 bg-zinc-900 text-zinc-600',
+  };
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${styles[status]}`}>
+      {status}
+    </span>
+  );
+}
+
+function JsonView({ title, data }: { title: string; data: any }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[9px] font-bold uppercase tracking-widest text-zinc-600">{title}</div>
+      <pre className="max-h-[200px] overflow-auto rounded-xl bg-zinc-950/80 p-3 font-mono text-[10px] text-zinc-300 shadow-inner">
+        {JSON.stringify(data, null, 2)}
+      </pre>
+    </div>
+  );
+}
+
 // --- Main App ---
 
 export default function App() {
@@ -104,6 +157,12 @@ export default function App() {
   const [launchInFlight, setLaunchInFlight] = useState(false);
   const [lastLaunchId, setLastLaunchId] = useState<string | null>(null);
   const [launchErr, setLaunchErr] = useState<ApiError | null>(null);
+
+  const [runs, setRuns] = useState<RunInfo[]>([]);
+  const [runsErr, setRunsErr] = useState<ApiError | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   const fetchJson = async (path: string, options?: RequestInit) => {
     const resp = await fetch(path, options);
@@ -158,6 +217,14 @@ export default function App() {
       successCount++;
     } catch (e: any) { setSystemErr(e); }
 
+    // Runs
+    try {
+      const r = await fetchJson('/api/runs?limit=100');
+      setRuns(r.items);
+      setRunsErr(null);
+      successCount++;
+    } catch (e: any) { setRunsErr(e); }
+
     // Only update "Last Refresh" if all core endpoints succeeded
     if (successCount === totalRequests) {
       setLastSuccess(new Date().toLocaleTimeString());
@@ -174,10 +241,9 @@ export default function App() {
     setControlInFlight(true);
     setControlActionErr(null);
     try {
-      const resp = await fetch(`/api/control/${mode}`, { method: 'POST' });
-      const data = await resp.json();
-      if (!data.ok) throw data.error;
-      // Immediate refresh of control and history
+      await fetchJson(`/api/control/${mode}`, { method: 'POST' });
+      // Refresh of control and history is handled by refreshData called in handleLaunch or wait for poll
+      // But for better UX we trigger a full data refresh immediately
       await refreshData();
     } catch (e: any) {
       setControlActionErr(e);
@@ -200,6 +266,26 @@ export default function App() {
       setLaunchErr(e);
     } finally {
       setLaunchInFlight(false);
+    }
+  };
+
+  const toggleRunDetail = async (expId: string) => {
+    if (selectedRunId === expId) {
+      setSelectedRunId(null);
+      setRunDetail(null);
+      return;
+    }
+    
+    setSelectedRunId(expId);
+    setDetailLoading(true);
+    setRunDetail(null);
+    try {
+      const data = await fetchJson(`/api/runs/${expId}`);
+      setRunDetail(data.detail);
+    } catch (e: any) {
+      console.error(e);
+    } finally {
+      setDetailLoading(false);
     }
   };
 
@@ -315,7 +401,7 @@ export default function App() {
                 disabled={launchInFlight}
                 className="w-full flex items-center justify-center gap-2 rounded-2xl bg-zinc-100 py-4 text-sm font-black text-zinc-950 transition hover:bg-white disabled:opacity-50"
               >
-                {launchInFlight ? <Clock className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4 fill-zinc-950" />}
+                {launchInFlight ? <Loader2 className="h-4 w-4 animate-spin text-zinc-950" /> : <Zap className="h-4 w-4 fill-zinc-950" />}
                 LAUNCH EXPERIMENT
               </button>
               
@@ -370,6 +456,84 @@ export default function App() {
                       </tr>
                     )) : (
                       <tr><td colSpan={4} className="px-6 py-12 text-center text-zinc-600 font-medium italic">Audit log is empty.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Runs Explorer Section */}
+        <section className="flex flex-col gap-4 lg:col-span-2">
+          <div className="flex items-center gap-2 px-1 text-zinc-400">
+            <Database className="h-4 w-4" />
+            <h2 className="text-xs font-bold uppercase tracking-[0.25em]">Runs Explorer</h2>
+          </div>
+          
+          <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-950/50">
+            {runsErr ? (
+              <div className="p-6"><ErrorBanner error={runsErr} /></div>
+            ) : (
+              <div className="max-h-[500px] overflow-y-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="sticky top-0 border-b border-zinc-800 bg-zinc-950/80 text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500 backdrop-blur-md">
+                    <tr>
+                      <th className="px-6 py-4">EXP ID</th>
+                      <th className="px-6 py-4">Status</th>
+                      <th className="px-6 py-4">Created</th>
+                      <th className="px-6 py-4 text-center">Artifacts</th>
+                      <th className="px-6 py-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-900 border-zinc-800">
+                    {runs.length > 0 ? runs.map((r) => (
+                      <tbody key={r.exp_id} className="contents divide-y divide-zinc-900 border-zinc-800">
+                        <tr className={`hover:bg-zinc-900/20 cursor-pointer ${selectedRunId === r.exp_id ? 'bg-zinc-900/40 border-l-2 border-blue-500' : ''}`} onClick={() => toggleRunDetail(r.exp_id)}>
+                          <td className="whitespace-nowrap px-6 py-3 font-mono font-bold text-zinc-100">{r.exp_id}</td>
+                          <td className="px-6 py-3"><StatusBadge status={r.status} /></td>
+                          <td className="whitespace-nowrap px-6 py-3 font-mono text-[11px] text-zinc-500">{r.created_at}</td>
+                          <td className="px-6 py-3 text-center">
+                            <div className="flex justify-center gap-2">
+                              {r.has_summary && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
+                              {r.has_stdout && <div className="h-2 w-2 rounded-full border border-zinc-700" title="stdout.log" />}
+                            </div>
+                          </td>
+                          <td className="px-6 py-3 text-right text-zinc-600">
+                             {selectedRunId === r.exp_id ? <ChevronDown className="h-4 w-4 inline" /> : <ChevronRight className="h-4 w-4 inline" />}
+                          </td>
+                        </tr>
+                        {selectedRunId === r.exp_id && (
+                          <tr>
+                            <td colSpan={5} className="bg-zinc-900/30 p-6 shadow-inner animate-in fade-in slide-in-from-top-1 duration-300">
+                              {detailLoading ? (
+                                <div className="flex items-center justify-center py-12">
+                                  <Loader2 className="h-6 w-6 animate-spin text-zinc-600" />
+                                </div>
+                              ) : runDetail ? (
+                                <div className="grid gap-6 md:grid-cols-3">
+                                  <JsonView title="Manifest (Launch Intent)" data={runDetail.manifest} />
+                                  <JsonView title="Runtime State (Lifecycle)" data={runDetail.runtime_state} />
+                                  <JsonView title="Run Summary (Evidence)" data={runDetail.summary} />
+                                  <div className="md:col-span-3 flex justify-between items-center pt-4 border-t border-zinc-800">
+                                      <span className="text-[10px] font-bold uppercase text-zinc-600 flex items-center gap-2">
+                                        Logs: {r.has_stdout ? <span className="text-zinc-400 underline cursor-pointer hover:text-white">stdout.log</span> : 'none'}
+                                      </span>
+                                      <div className="flex gap-2">
+                                         <button disabled className="rounded-md bg-zinc-800 px-3 py-1 text-[10px] font-bold text-zinc-400 hover:bg-zinc-700 disabled:opacity-30">Forensics</button>
+                                         <button disabled className="rounded-md bg-zinc-800 px-3 py-1 text-[10px] font-bold text-zinc-400 hover:bg-zinc-700 disabled:opacity-30">Replay</button>
+                                      </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="text-center py-6 text-zinc-600 italic">Failed to load run detail.</div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    )) : (
+                      <tr><td colSpan={5} className="px-6 py-12 text-center text-zinc-600 font-medium italic">No experiment runs found.</td></tr>
                     )}
                   </tbody>
                 </table>

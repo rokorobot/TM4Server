@@ -213,3 +213,50 @@ async def launch_run():
                 }
             }
         )
+
+@router.get("/runs")
+async def get_runs(limit: int = Query(50, ge=1, le=500)):
+    """Returns a list of normalized run metadata from the runs/ directory."""
+    try:
+        items = state.list_runs(RUNS_DIR, limit=limit)
+        return {"ok": True, "items": items, "count": len(items)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "RUNS_LIST_ERROR",
+                    "message": str(e)
+                }
+            }
+        )
+
+@router.get("/runs/{exp_id}")
+async def get_run_detail(exp_id: str):
+    """Returns raw JSON payloads (manifest, state, summary) for a specific run."""
+    try:
+        detail = state.get_run_detail(RUNS_DIR, exp_id)
+        return {"ok": True, "detail": detail}
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "RUN_NOT_FOUND",
+                    "message": str(e)
+                }
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "RUN_DETAIL_ERROR",
+                    "message": str(e)
+                }
+            }
+        )

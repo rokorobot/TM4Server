@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Union
 from contextlib import contextmanager
 
 
@@ -205,25 +205,44 @@ class StateManager:
         self,
         runtime_state: str,
         current_exp_id: str | None = None,
-        queue_depth: int = 0,
+        queue_depth: int | None = None,
         last_completed_exp_id: str | None = None,
         extra: dict[str, Any] | None = None,
+        reset_current: bool = False # Explicit flag to clear current_exp_id
     ) -> None:
-        """Writes the current runtime status atomically."""
+        """Writes the current runtime status atomically, carrying forward existing fields where appropriate."""
+        current = self.read_status()
+        
         payload: dict[str, Any] = {
             "status_version": 1,
             "ts_utc": utc_now_iso(),
             "instance_id": socket.gethostname(),
-            "runtime_state": runtime_state,
-            "current_exp_id": current_exp_id,
-            "queue_depth": queue_depth,
-            "last_completed_exp_id": last_completed_exp_id,
             "worker_pid": os.getpid(),
-            "tm4server_version": git_short_commit(self.tm4server_repo) if self.tm4server_repo else None,
-            "tm4core_version": git_short_commit(self.tm4core_repo) if self.tm4core_repo else None,
+            "tm4server_version": git_short_commit(self.tm4server_repo) if self.tm4server_repo else current.get("tm4server_version"),
+            "tm4core_version": git_short_commit(self.tm4core_repo) if self.tm4core_repo else current.get("tm4core_version"),
+            "runtime_state": runtime_state,
         }
+
+        # current_exp_id: Use provided, or clear if reset_current, or carry forward
+        if current_exp_id is not None:
+            payload["current_exp_id"] = current_exp_id
+        elif reset_current:
+            payload["current_exp_id"] = None
+        else:
+            payload["current_exp_id"] = current.get("current_exp_id")
+
+        # queue_depth: Use provided or carry forward
+        payload["queue_depth"] = queue_depth if queue_depth is not None else current.get("queue_depth", 0)
+        
+        # last_completed_exp_id: Use provided or carry forward (NEVER clear automatically)
+        payload["last_completed_exp_id"] = last_completed_exp_id if last_completed_exp_id is not None else current.get("last_completed_exp_id")
+
+        # Merge extra
+        payload_extra = current.get("extra", {}).copy()
         if extra:
-            payload.update(extra)
+            payload_extra.update(extra)
+        payload["extra"] = payload_extra
+        
         atomic_write_json(self.paths.status_json, payload)
 
     def allocate_next_exp_id(self, runs_dir: Path, prefix: str = "EXP-SER") -> str:
@@ -387,3 +406,77 @@ class StateManager:
                 continue
         
         return interrupted_count
+
+    def list_runs(self, runs_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
+        """Scans runs_dir and returns a list of normalized run metadata objects."""
+        if not runs_dir.exists():
+            return []
+            
+        runs = []
+        for d in runs_dir.iterdir():
+            if not d.is_dir() or not d.name.startswith("EXP"):
+                continue
+                
+            manifest_path = d / "run_manifest.json"
+            state_path = d / "runtime_state.json"
+            summary_path = d / "run_summary.json"
+            
+            # 1. Base Metadata from Manifest
+            manifest = read_json_safe(manifest_path, {})
+            state = read_json_safe(state_path, {})
+            summary = read_json_safe(summary_path, {})
+            
+            # 2. Strict Status Precedence
+            # failed (summary) > completed (summary) > running (state) > interrupted (state) > queued (state) > unknown
+            status = "unknown"
+            if summary_path.exists():
+                s_status = summary.get("status")
+                if s_status == "failed":
+                    status = "failed"
+                else: # covers 'completed' and 'success'
+                    status = "completed"
+            elif state.get("status") == "running":
+                status = "running"
+            elif state.get("status") == "interrupted":
+                status = "interrupted"
+            elif state.get("status") == "queued":
+                status = "queued"
+            
+            # 3. Normalized Row
+            run = {
+                "exp_id": d.name,
+                "status": status,
+                "created_at": manifest.get("created_at") or manifest.get("submitted_at"),
+                "started_at": state.get("started_at"),
+                "completed_at": summary.get("ts_utc") or state.get("completed_at") or state.get("failed_at"),
+                "task": manifest.get("task", "unknown"),
+                "model": manifest.get("model", "unknown"),
+                "requested_by": manifest.get("requested_by", "unknown"),
+                "failure_reason": summary.get("error") or state.get("failure_reason") or state.get("error"),
+                "has_summary": summary_path.exists(),
+                "has_results": (d / "results.json").exists(),
+                "has_stdout": (d / "stdout.log").exists(),
+                "has_stderr": (d / "stderr.log").exists(),
+                "duration_s": None # TODO: calculate if needed
+            }
+            runs.append(run)
+            
+        # 4. Sort newest first by manifest created_at
+        def sort_key(r):
+            return r.get("created_at") or "0"
+            
+        runs.sort(key=sort_key, reverse=True)
+        return runs[:limit]
+
+    def get_run_detail(self, runs_dir: Path, exp_id: str) -> dict[str, Any]:
+        """Returns the full raw JSON payloads for a specific run."""
+        run_dir = runs_dir / exp_id
+        if not run_dir.exists():
+            raise FileNotFoundError(f"Run directory not found: {exp_id}")
+            
+        return {
+            "exp_id": exp_id,
+            "manifest": read_json_safe(run_dir / "run_manifest.json", {}),
+            "runtime_state": read_json_safe(run_dir / "runtime_state.json", {}),
+            "summary": read_json_safe(run_dir / "run_summary.json", {})
+        }

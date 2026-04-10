@@ -42,7 +42,7 @@ def main() -> None:
     # Initialize status
     state.write_status(
         runtime_state="idle",
-        current_exp_id=None,
+        reset_current=True,
         queue_depth=get_queue_depth(state)
     )
 
@@ -55,12 +55,12 @@ def main() -> None:
 
             # 1. Dispatch by Mode
             if mode == "halt":
-                state.write_status(runtime_state="halted", queue_depth=queue_depth)
+                state.write_status(runtime_state="halted", reset_current=True, queue_depth=queue_depth)
                 time.sleep(POLL_INTERVAL_S)
                 continue
 
             if mode == "pause":
-                state.write_status(runtime_state="paused", queue_depth=queue_depth)
+                state.write_status(runtime_state="paused", reset_current=True, queue_depth=queue_depth)
                 time.sleep(POLL_INTERVAL_S)
                 continue
 
@@ -68,7 +68,7 @@ def main() -> None:
             try:
                 if not pending_run:
                     # Idle state: symmetrical heartbeat
-                    state.write_status(runtime_state="idle", queue_depth=queue_depth)
+                    state.write_status(runtime_state="idle", reset_current=True, queue_depth=queue_depth)
                     time.sleep(POLL_INTERVAL_S)
                     continue
                 
@@ -76,7 +76,7 @@ def main() -> None:
                 processed = process_one(run_dir=pending_run, state_manager=state)
                 
                 # Update back to idle or next pending check
-                state.write_status(runtime_state="idle", queue_depth=get_queue_depth(state))
+                state.write_status(runtime_state="idle", reset_current=True, queue_depth=get_queue_depth(state))
                 
             except Exception as e:
                 state.write_status(
@@ -90,6 +90,7 @@ def main() -> None:
     except KeyboardInterrupt:
         state.write_status(
             runtime_state="halted",
+            reset_current=True,
             queue_depth=get_queue_depth(state),
             extra={"reason": "keyboard_interrupt"}
         )
