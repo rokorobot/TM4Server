@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import type { ReactNode } from 'react';
 import { 
   Activity, 
@@ -525,8 +525,8 @@ export default function App() {
             ) : (
               <div className="md:col-span-2 flex flex-col items-center justify-center rounded-3xl border border-zinc-800 border-dashed bg-zinc-950/30 py-12 text-zinc-600">
                 <Database className="h-8 w-8 mb-3 opacity-20" />
-                <div className="text-sm font-medium">No convergent regimes detected yet.</div>
-                <div className="text-[10px] uppercase tracking-widest mt-1">Requires $N \ge 3$ classified runs per Task/Model pairing.</div>
+                <div className="text-sm font-medium">No regime insights available yet.</div>
+                <div className="text-[10px] uppercase tracking-widest mt-1">Requires at least 3 classified runs per Task/Model regime.</div>
               </div>
             )}
           </div>
@@ -668,7 +668,7 @@ export default function App() {
                   </thead>
                   <tbody className="divide-y divide-zinc-900 border-zinc-800">
                     {runs.length > 0 ? runs.map((r) => (
-                      <tbody key={r.exp_id} className="contents divide-y divide-zinc-900 border-zinc-800">
+                      <Fragment key={r.exp_id}>
                         <tr className={`hover:bg-zinc-900/20 cursor-pointer ${selectedRunId === r.exp_id ? 'bg-zinc-900/40 border-l-2 border-blue-500' : ''}`} onClick={() => toggleRunDetail(r.exp_id)}>
                           <td className="whitespace-nowrap px-6 py-3 font-mono font-bold text-zinc-100">{r.exp_id}</td>
                           <td className="px-6 py-3"><StatusBadge status={r.status} /></td>
@@ -751,7 +751,7 @@ export default function App() {
                             </td>
                           </tr>
                         )}
-                      </tbody>
+                      </Fragment>
                     )) : (
                       <tr><td colSpan={6} className="px-6 py-12 text-center text-zinc-600 font-medium italic">No experiment runs found.</td></tr>
                     )}

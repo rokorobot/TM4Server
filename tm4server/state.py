@@ -505,19 +505,27 @@ class StateManager:
             if not d.is_dir() or not d.name.startswith("EXP"):
                 continue
                 
-            manifest_path = d / "run_manifest.json"
-            class_path = d / "classification.json"
-            
-            if not manifest_path.exists() or not class_path.exists():
+            if not manifest_path.exists():
                 continue
                 
             manifest = read_json_safe(manifest_path, {})
             class_payload = read_json_safe(class_path, {})
-            
-            task = manifest.get("task", "unknown")
-            model = manifest.get("model", "unknown")
             classification = class_payload.get("classification")
             
+            # 1. Auto-classify on-the-fly if missing and summary exists
+            if not classification:
+                summary_path = d / "run_summary.json"
+                if summary_path.exists():
+                    from .analysis.classifier import ExperimentClassifier
+                    summary = read_json_safe(summary_path, {})
+                    try:
+                        classifier = ExperimentClassifier()
+                        result = classifier.classify(summary)
+                        classification = result.get("classification")
+                    except Exception:
+                        pass
+            
+            # 2. Skip if still no classification (failed or incomplete)
             if not classification:
                 continue
                 
