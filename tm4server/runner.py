@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 from pathlib import Path
 import shutil
 import traceback
+import os
 
 if TYPE_CHECKING:
     from .state import StateManager
@@ -72,12 +73,33 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
         # Note: runtime.py also manages aggregation and reports in its finally block
         results = run_experiment(run_dir, manifest)
 
-        # 3. Terminal Success
+        # 3. Terminal Completion (Summary MUST exist before state is terminal)
+        summary_path = run_dir / "run_summary.json"
+        if not summary_path.exists():
+            # Fallback summary if runtime.py didn't write it
+            write_json(summary_path, {
+                "experiment_id": exp_id,
+                "status": "completed",
+                "ts_utc": utc_now_iso(),
+            })
+
         runtime_state["status"] = "completed"
         runtime_state["completed_at"] = utc_now_iso()
         runtime_state["updated_at"] = utc_now_iso()
         write_json(state_file, runtime_state)
         
+        # 4. Sync Global Status
+        if state_manager:
+            try:
+                state_manager.write_status(
+                    runtime_state="idle",
+                    current_exp_id=None,
+                    queue_depth=state_manager.get_workload_summary(RUNS_DIR).get("pending", 0),
+                    last_completed_exp_id=exp_id
+                )
+            except Exception:
+                pass
+
         return True
 
     except Exception as e:
@@ -85,13 +107,7 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
         append_line(stderr_log, f"[{utc_now_iso()}] " + traceback.format_exc())
 
         # 3. Terminal Failure
-        runtime_state["status"] = "failed"
-        runtime_state["failed_at"] = utc_now_iso()
-        runtime_state["updated_at"] = utc_now_iso()
-        runtime_state["error"] = str(e)
-        write_json(state_file, runtime_state)
-        
-        # Ensure a final attempt at a summary exists if runtime.py didn't reach it
+        # Ensure a final attempt at a summary exists before setting state
         summary_path = run_dir / "run_summary.json"
         if not summary_path.exists():
             try:
@@ -102,6 +118,24 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
                     "ts_utc": utc_now_iso(),
                 })
             except Exception:
+                pass
+
+        runtime_state["status"] = "failed"
+        runtime_state["failed_at"] = utc_now_iso()
+        runtime_state["updated_at"] = utc_now_iso()
+        runtime_state["error"] = str(e)
+        write_json(state_file, runtime_state)
+        
+        if state_manager:
+             try:
+                state_manager.write_status(
+                    runtime_state="idle",
+                    current_exp_id=None,
+                    queue_depth=state_manager.get_workload_summary(RUNS_DIR).get("pending", 0),
+                    last_completed_exp_id=exp_id,
+                    extra={"last_error": str(e)}
+                )
+             except Exception:
                 pass
 
         return True

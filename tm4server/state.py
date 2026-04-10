@@ -266,7 +266,7 @@ class StateManager:
                 try:
                     data = read_json_strict(summary_file)
                     status = data.get("status", "unknown")
-                    if status == "success":
+                    if status == "completed" or status == "success":
                         summary["completed"] += 1
                     elif status == "failed":
                         summary["failed"] += 1

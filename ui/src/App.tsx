@@ -108,8 +108,9 @@ export default function App() {
   const fetchJson = async (path: string, options?: RequestInit) => {
     const resp = await fetch(path, options);
     const data = await resp.json();
-    if (!data.ok) {
-      throw data.error || { code: 'UNKNOWN_ERROR', message: 'An unexpected error occurred' };
+    if (!resp.ok || !data.ok) {
+        const err = data?.detail?.error || data?.error || { code: 'HTTP_ERROR', message: resp.statusText || 'An unexpected error occurred' };
+        throw err;
     }
     return data;
   };
