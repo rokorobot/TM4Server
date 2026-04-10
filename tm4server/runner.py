@@ -93,7 +93,7 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
             try:
                 state_manager.write_status(
                     runtime_state="idle",
-                    current_exp_id=None,
+                    reset_current=True,
                     queue_depth=state_manager.get_workload_summary(RUNS_DIR).get("pending", 0),
                     last_completed_exp_id=exp_id
                 )
@@ -130,9 +130,8 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
              try:
                 state_manager.write_status(
                     runtime_state="idle",
-                    current_exp_id=None,
+                    reset_current=True,
                     queue_depth=state_manager.get_workload_summary(RUNS_DIR).get("pending", 0),
-                    last_completed_exp_id=exp_id,
                     extra={"last_error": str(e)}
                 )
              except Exception:

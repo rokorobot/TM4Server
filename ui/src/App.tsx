@@ -172,7 +172,7 @@ interface DecisionInsight {
 }
 
 interface DecisionTaskView {
-  projected: DecisionInsight;
+  projected: DecisionInsight | null;
   locked: DecisionInsight | null;
   effective: DecisionInsight;
   has_locked: boolean;
@@ -455,7 +455,7 @@ function DecisionTaskCard({ task, view, onLock, isLocking }: { task: string; vie
         <MiniMetric title="Winner" value={decision.winner_model ?? '—'} subvalue={decision.winner_score?.toFixed(3)} color="text-cyan-500" />
         <MiniMetric title="Runner Up" value={decision.runner_up_model ?? '—'} subvalue={decision.runner_up_score?.toFixed(3)} />
         <MiniMetric title="Margin" value={decision.margin?.toFixed(3) ?? '—'} subvalue="Required: 0.150+" />
-        <MiniMetric title="Source Date" value={decision.locked_at ? new Date(decision.locked_at).toLocaleDateString() : '—'} subvalue={decision.locked_at ? new Date(decision.locked_at).toLocaleTimeString() : 'Not Locked'} />
+        <MiniMetric title="Source Date" value={decision.locked ? (decision.locked_at ? new Date(decision.locked_at).toLocaleDateString() : '—') : (decision.evaluated_at ? new Date(decision.evaluated_at).toLocaleDateString() : '—')} subvalue={decision.locked ? 'Locked Date' : 'Evaluate Date'} />
       </div>
 
       <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-5">
@@ -470,7 +470,7 @@ function DecisionTaskCard({ task, view, onLock, isLocking }: { task: string; vie
         <div className="rounded-2xl border border-zinc-900 bg-zinc-900/20 p-4">
           <div className="flex items-center justify-between mb-3 text-[9px] font-bold uppercase tracking-widest text-zinc-600">
             <span>Winner Snapshot</span>
-            <span className="text-zinc-400">{winner.label.replace('_', ' ')}</span>
+            <span className="text-zinc-400">{winner.label.replaceAll('_', ' ')}</span>
           </div>
           <div className="grid grid-cols-4 gap-4">
             <MetricBlock label="Power" value={`${Math.round(winner.power * 100)}%`} />

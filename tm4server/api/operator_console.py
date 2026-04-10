@@ -459,7 +459,10 @@ async def lock_task_decision(task: str, force: bool = Query(False)):
         ranks = pareto.get("tasks", {}).get(task)
         
         if not ranks:
-            raise ValueError(f"No evidence found for task '{task}'")
+            raise HTTPException(
+                status_code=400,
+                detail={"ok": False, "error": {"code": "INSUFFICIENT_EVIDENCE", "message": f"No evidence found for task '{task}' to lock a decision."}}
+            )
             
         engine = DecisionEngine()
         decision = engine.evaluate_task(task, ranks)
