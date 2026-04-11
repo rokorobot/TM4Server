@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 import json
 
 from ..state import StateManager, atomic_write_json, utc_now_iso, git_short_commit, read_json_strict
@@ -6,6 +6,7 @@ from ..config import TM4_RUNTIME_ROOT, TM4SERVER_REPO_ROOT, TM4CORE_REPO_ROOT, R
 from ..analysis.classifier import ExperimentClassifier
 from ..analysis.pareto_analyzer import ParetoAnalyzer
 from ..analysis.decision_engine import DecisionEngine
+from ..promoter import PromotionManager
 
 router = APIRouter(tags=["Operator Console"])
 
@@ -16,16 +17,29 @@ state = StateManager(
     tm4server_repo=TM4SERVER_REPO_ROOT,
     tm4core_repo=TM4CORE_REPO_ROOT
 )
+promoter = PromotionManager()
 
 @router.get("/status")
 async def get_status():
-    """Returns current runtime status."""
+    """Returns current runtime status, joining operator intent with execution reality."""
     try:
         status_data = state.read_status()
-        # Enrich status with live workload metrics from runs/
+        
+        # 1. Enrich status with live workload metrics from runs/
         workload = state.get_workload_summary(RUNS_DIR)
         status_data.update(workload)
-        return {"ok": True, "status": status_data}
+        
+        # 2. Add Execution Spine Awareness
+        control_mode = state.get_control_state()
+        active_run = state.get_active_run()
+        
+        return {
+            "ok": True, 
+            "status": status_data,
+            "control_state": control_mode,
+            "runtime_state": status_data.get("runtime_state", "busy" if active_run else "idle"),
+            "active_run": active_run
+        }
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=500, 
@@ -118,8 +132,35 @@ def _set_mode_response(mode: str, source: str = "api"):
 
 @router.post("/control/run")
 async def set_mode_run():
-    """Sets control mode to run."""
-    return _set_mode_response("run")
+    """Sets control mode to run if the execution spine is idle."""
+    try:
+        active_run = state.get_active_run()
+        if active_run is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "ok": False,
+                    "error": {
+                        "code": "RUNTIME_BUSY",
+                        "message": "A run is already active. Phase 2A allows only one run at a time."
+                    },
+                    "active_run": active_run
+                }
+            )
+        return _set_mode_response("run")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "RUN_REQUEST_ERROR",
+                    "message": str(e)
+                }
+            }
+        )
 
 @router.post("/control/pause")
 async def set_mode_pause():
@@ -152,70 +193,17 @@ async def get_version():
 
 @router.post("/runs/launch")
 async def launch_run():
-    """Allocates a new experiment ID, creates the environment, and queues the workload."""
-    try:
-        exp_id = state.allocate_next_exp_id(RUNS_DIR)
-        run_dir = RUNS_DIR / exp_id
-        
-        created_at = utc_now_iso()
-        
-        # 1. Immutable Launch Intent
-        manifest = {
-            "schema_version": 1,
-            "exp_id": exp_id,
-            "experiment_id": exp_id, # for backward compatibility
-            "task": "autonomy",
-            "model": "default",
-            "created_at": created_at,
-            "submitted_at": created_at,
-            "requested_by": "operator_console",
-            "tm4server_version": git_short_commit(TM4SERVER_REPO_ROOT) if TM4SERVER_REPO_ROOT else None,
-            "status": "queued"
-        }
-        atomic_write_json(run_dir / "run_manifest.json", manifest)
-        
-        # 2. Live Execution State
-        runtime_state = {
-            "status": "queued",
-            "created_at": created_at,
-            "updated_at": created_at
-        }
-        atomic_write_json(run_dir / "runtime_state.json", runtime_state)
-        
-        # Trigger an immediate status update so the UI sees the new pending count
-        # In a real system, we'd wait for a poll, but for a better UX we can write status now
-        try:
-            current_status = state.read_status()
-            workload = state.get_workload_summary(RUNS_DIR)
-            current_status.update(workload)
-            state.write_status(
-                runtime_state=current_status.get("runtime_state", "idle"),
-                current_exp_id=current_status.get("current_exp_id"),
-                queue_depth=workload.get("pending", 0),
-                last_completed_exp_id=current_status.get("last_completed_exp_id"),
-                extra=current_status.get("extra")
-            )
-        except Exception:
-            pass # Non-critical if pre-emptive status update fails
-
-        return {
-            "ok": True,
-            "status": "queued",
-            "exp_id": exp_id,
-            "run_dir": str(run_dir)
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "ok": False,
-                "error": {
-                    "code": "LAUNCH_FAILURE",
-                    "message": str(e)
-                }
+    """Queued run launch is disabled in Phase 2A. Core spine uses POST /control/run."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "ok": False,
+            "error": {
+                "code": "PHASE_MISMATCH",
+                "message": "Queued run launch is disabled in Phase 2A. Use POST /api/control/run for the single-run execution spine."
             }
-        )
+        }
+    )
 
 @router.get("/runs")
 async def get_runs(limit: int = Query(50, ge=1, le=500)):
@@ -235,11 +223,11 @@ async def get_runs(limit: int = Query(50, ge=1, le=500)):
             }
         )
 
-@router.get("/runs/{exp_id}")
-async def get_run_detail(exp_id: str):
-    """Returns raw JSON payloads (manifest, state, summary) for a specific run."""
+@router.get("/runs/{run_id}")
+async def get_run_detail(run_id: str):
+    """Returns raw JSON payloads (manifest, status, summary) for a specific run."""
     try:
-        detail = state.get_run_detail(RUNS_DIR, exp_id)
+        detail = state.get_run_detail(RUNS_DIR, run_id)
         return {"ok": True, "detail": detail}
     except FileNotFoundError as e:
         raise HTTPException(
@@ -372,8 +360,9 @@ async def get_pareto_analysis():
 
 @router.get("/analysis/decisions")
 async def get_decisions_v2():
-    """Calculates authoritative 'Triple-View' decisions (Projected, Locked, Effective)."""
+    """Calculates authoritative 'Triple-View' decisions (Projected, Locked, Effective) with v1.6 Promotion state."""
     try:
+        from tm4server.analysis.pareto_analyzer import ParetoAnalyzer
         report = state.build_regime_index(RUNS_DIR)
         pareto = ParetoAnalyzer().analyze_report(report)
         engine = DecisionEngine()
@@ -394,66 +383,74 @@ async def get_decisions_v2():
                     continue
         
         # 3. Build Triple-View Report
-        all_tasks = set(projected_map.keys()) | set(locked_map.keys())
+        all_tasks = sorted(list(set(projected_map.keys()) | set(locked_map.keys())))
         tasks_report = {}
         
         for task in all_tasks:
             proj = projected_map.get(task)
             lock = locked_map.get(task)
             
-            has_locked = lock is not None
-            has_drift, drift_type, drift_reason = detect_drift(proj, lock)
+            # Resolution: Locked artifacts are authoritative
+            eff = lock or proj
             
-            effective = lock if has_locked else proj
+            drift, d_type, d_reason = detect_drift_v2(proj, lock)
             
+            # Load active promotion state
+            active_promo = promoter.get_active_promotion(task)
+            is_active = False
+            if active_promo and lock:
+                is_active = active_promo.get("winner_model") == lock.get("winner_model")
+
             tasks_report[task] = {
+                "task": task,
                 "projected": proj,
                 "locked": lock,
-                "effective": effective,
-                "has_locked": has_locked,
-                "has_drift": has_drift,
-                "drift_type": drift_type,
-                "drift_reason": drift_reason
+                "effective": eff,
+                "has_locked": lock is not None,
+                "has_drift": drift,
+                "drift_type": d_type,
+                "drift_reason": d_reason,
+                "is_active": is_active,
+                "lock_available": proj is not None
             }
             
         return {
             "ok": True, 
             "report": {
-                "version": "v2",
+                "version": "v1.6",
                 "generated_at": utc_now_iso(),
                 "tasks": tasks_report
             }
         }
     except Exception as e:
+        import traceback
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail={"ok": False, "error": {"code": "DECISION_ERROR", "message": str(e)}})
 
 @router.post("/tasks/{task}/decide")
-async def lock_task_decision(task: str, force: bool = Query(False)):
-    """Computes and PERSISTS a formal governance decision for a task. Requires force=true to overwrite."""
+async def lock_task_decision(task: str, request: Request, force: bool = Query(False)):
+    """Authoritatively locks a decision for a task. Requires ?force=true to overwrite."""
     try:
-        decision_path = DECISIONS_DIR / f"{task}.json"
+        body = await request.json()
+        actor = body.get("actor", "manual_operator")
+        
+        from ..state import get_system_actor, atomic_write_json
+        target_path = DECISIONS_DIR / f"{task}.json"
         existing_locked = None
-        if decision_path.exists():
+        
+        if target_path.exists():
             if not force:
                 raise HTTPException(
                     status_code=409,
-                    detail={
-                        "ok": False,
-                        "error": {
-                            "code": "DECISION_ALREADY_LOCKED",
-                            "message": "A locked decision already exists for this task. Re-submit with force=true to overwrite.",
-                            "task": task,
-                            "existing_path": str(decision_path)
-                        }
-                    }
+                    detail={"ok": False, "error": {"code": "DECISION_ALREADY_LOCKED", "message": f"Task '{task}' is already locked. Use force=true to overwrite."}}
                 )
-            # Load lineage
+            # Preserve lineage
             try:
-                existing_locked = json.loads(decision_path.read_text(encoding="utf-8"))
+                existing_locked = json.loads(target_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
 
-        # 1. Compute current projected decision
+        # 1. Compute current projection
         report = state.build_regime_index(RUNS_DIR)
         pareto = ParetoAnalyzer().analyze_report(report)
         ranks = pareto.get("tasks", {}).get(task)
@@ -467,44 +464,95 @@ async def lock_task_decision(task: str, force: bool = Query(False)):
         engine = DecisionEngine()
         decision = engine.evaluate_task(task, ranks)
         
-        # 2. Upgrade to Locked Artifact
+        # 2. Upgrade to Authoritative Locked Artifact
         decision["locked"] = True
         decision["locked_at"] = utc_now_iso()
-        decision["decision_path"] = str(decision_path)
+        decision["decision_path"] = str(target_path)
+        decision["actor"] = actor
+        decision["system_actor"] = get_system_actor()
+        
         if existing_locked:
             decision["previous_locked_at"] = existing_locked.get("locked_at")
-
-        # 3. Persist
-        atomic_write_json(decision_path, decision)
+            decision["supersedes_decision_path"] = str(target_path) # same path, but logically a new generation
+            
+        atomic_write_json(target_path, decision)
         
-        return {"ok": True, "decision": decision, "path": str(decision_path)}
+        return {"ok": True, "decision": decision}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={"ok": False, "error": {"code": "DECISION_LOCK_ERROR", "message": str(e)}}
-        )
+        raise HTTPException(status_code=500, detail={"ok": False, "error": {"code": "LOCK_ERROR", "message": str(e)}})
 
-def detect_drift(projected, locked):
+@router.post("/tasks/{task}/promote")
+async def promote_task_default(task: str, request: Request):
+    """Promotes a locked winner to system default mapping."""
+    try:
+        body = await request.json()
+        actor = body.get("actor", "manual_operator")
+        
+        target_path = DECISIONS_DIR / f"{task}.json"
+        
+        if not target_path.exists():
+             raise HTTPException(
+                status_code=404,
+                detail={"ok": False, "error": {"code": "DECISION_NOT_FOUND", "message": f"No locked decision found for task '{task}'. Lock a decision first."}}
+            )
+             
+        decision = json.loads(target_path.read_text(encoding="utf-8"))
+        promotion = promoter.promote(task, decision, actor)
+        
+        return {"ok": True, "promotion": promotion}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"ok": False, "error": {"code": "PROMOTION_ERROR", "message": str(e)}})
+
+@router.post("/tasks/{task}/revoke")
+async def revoke_task_promotion(task: str, request: Request):
+    """Revokes an active model promotion for a task."""
+    try:
+        body = await request.json()
+        actor = body.get("actor", "manual_operator")
+        
+        result = promoter.revoke(task, actor)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"ok": False, "error": {"code": "REVOKE_ERROR", "message": str(e)}})
+
+@router.get("/tasks/{task}/promotion-history")
+async def get_promotion_history(task: str):
+    """Returns the immutable audit log for task promotions."""
+    try:
+        history = promoter.get_history(task)
+        return {"ok": True, "task": task, "history": history}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"ok": False, "error": {"code": "HISTORY_ERROR", "message": str(e)}})
+def detect_drift_v2(projected: dict | None, locked: dict | None) -> tuple[bool, str, str | None]:
     """Detects tier-based governance drift between live evidence and locked decisions."""
-    if not locked or not projected:
+    if not locked:
         return False, "NO_DRIFT", None
     
+    if not projected:
+        # A locked decision exists but current evidence is too thin to project anything.
+        return True, "GATES_DEGRADED", "Current evidence is insufficient to sustain a projection."
+
+    # Tier 1: Winner Changed
     if projected.get("winner_model") != locked.get("winner_model"):
         return True, "WINNER_CHANGED", f"Projected winner {projected.get('winner_model')} differs from locked."
     
+    # Tier 2: Status Changed
     if projected.get("promotion_status") != locked.get("promotion_status"):
         return True, "STATUS_CHANGED", f"Projected status {projected.get('promotion_status')} differs from locked."
-        
-    # Check gate degradation
+    
+    # Tier 3: Individual Gate Degradation
     p_checks = projected.get("checks", {})
     l_checks = locked.get("checks", {})
-    gates = ["reliability_pass", "stability_pass", "margin_pass", "governance_clear"]
-    for g in gates:
-        if l_checks.get(g) and not p_checks.get(g):
-            return True, "GATES_DEGRADED", f"Gate {g} no longer passing in live evidence."
-        if not l_checks.get(g) and p_checks.get(g):
-            return True, "GATES_IMPROVED", f"Gate {g} now passing in live evidence."
+    
+    for gate in ["reliability_pass", "stability_pass", "margin_pass", "governance_clear"]:
+        if l_checks.get(gate) and not p_checks.get(gate):
+            return True, "GATES_DEGRADED", f"Gate {gate} no longer passing in live evidence."
+            
+        if not l_checks.get(gate) and p_checks.get(gate):
+            return True, "GATES_IMPROVED", f"Gate {gate} now passing in live evidence."
 
     return False, "NO_DRIFT", None

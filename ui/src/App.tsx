@@ -17,7 +17,12 @@ import {
   Database,
   Loader2,
   AlertCircle,
-  Lock as LockIcon
+  Lock as LockIcon,
+  RotateCw,
+  ShieldCheck,
+  BoxSelect,
+  Undo2,
+  LockKeyhole
 } from 'lucide-react';
 
 const POLL_INTERVAL = 3000;
@@ -155,6 +160,9 @@ interface DecisionInsight {
   evaluated_at: string;
   locked_at?: string;
   decision_path?: string;
+  actor?: string;
+  system_actor?: string;
+  previous_locked_at?: string;
   winner_model?: string;
   winner_score?: number;
   runner_up_model?: string;
@@ -172,13 +180,16 @@ interface DecisionInsight {
 }
 
 interface DecisionTaskView {
+  task: string;
   projected: DecisionInsight | null;
   locked: DecisionInsight | null;
-  effective: DecisionInsight;
+  effective: DecisionInsight | null;
   has_locked: boolean;
   has_drift: boolean;
-  drift_type: string;
-  drift_reason?: string;
+  drift_type: 'NO_DRIFT' | 'WINNER_CHANGED' | 'STATUS_CHANGED' | 'GATES_DEGRADED' | 'GATES_IMPROVED';
+  drift_reason?: string | null;
+  is_active: boolean;
+  lock_available: boolean;
 }
 
 interface DecisionReportV2 {
@@ -408,103 +419,178 @@ function DecisionBadge({ status }: { status: DecisionInsight['promotion_status']
   );
 }
 
-function GateCheck({ label, passed }: { label: string; passed: boolean }) {
+function GateBadge({ label, pass }: { label: string; pass?: boolean | null }) {
   return (
-    <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2">
-      <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">{label}</span>
-      <span className={`flex items-center gap-1.5 text-[10px] font-black uppercase ${passed ? 'text-emerald-400' : 'text-amber-500'}`}>
-        {passed ? <CheckCircle2 className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
-        {passed ? 'Pass' : 'Fail'}
-      </span>
+    <div className={`flex flex-col gap-1.5 rounded-2xl border px-3 py-2 transition-all ${
+      pass === true ? 'border-emerald-500/30 bg-emerald-500/5 shadow-sm' : 
+      pass === false ? 'border-amber-500/30 bg-amber-500/5' : 
+      'border-zinc-800 bg-zinc-900/50 opacity-40'
+    }`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className={`text-[8px] font-black uppercase tracking-widest ${pass ? 'text-emerald-500/60' : 'text-zinc-600'}`}>{label}</span>
+        {pass === true ? (
+          <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500" />
+        ) : pass === false ? (
+          <ShieldAlert className="h-2.5 w-2.5 text-amber-500" />
+        ) : null}
+      </div>
+      <div className={`text-[10px] font-black uppercase tracking-tighter ${pass ? 'text-white' : 'text-zinc-500'}`}>
+        {pass === true ? 'Pass' : pass === false ? 'Gate Fail' : 'Pending'}
+      </div>
     </div>
   );
 }
 
-function DecisionTaskCard({ task, view, onLock, isLocking }: { task: string; view: DecisionTaskView; onLock: () => void; isLocking: boolean }) {
-  const decision = view.effective;
-  const winner = decision.winner_snapshot;
+function DecisionTaskCard({ 
+  task, 
+  view, 
+  onLock, 
+  onPromote,
+  onRevoke,
+  isLocking,
+  isPromoting
+}: { 
+  task: string; 
+  view: DecisionTaskView; 
+  onLock: () => void;
+  onPromote: () => void;
+  onRevoke: () => void;
+  isLocking: boolean;
+  isPromoting: boolean;
+}) {
+  const { effective, has_locked, has_drift, drift_type, drift_reason, is_active, lock_available } = view;
+  
+  if (!effective) return null;
+
+  // Choose the best timestamp to show context
+  const timestamp = view.locked ? view.locked.locked_at : view.projected?.evaluated_at;
+  const tsLabel = view.locked ? 'Locked Date' : 'Evaluated Date';
 
   return (
-    <div className="flex flex-col gap-5 rounded-3xl border border-zinc-800 bg-zinc-950/50 p-6 transition hover:border-zinc-700">
+    <div className={`group relative flex flex-col gap-5 rounded-3xl border transition-all hover:border-zinc-700 ${
+      is_active ? 'border-emerald-500/50 bg-emerald-950/20' : 
+      has_locked ? 'border-zinc-700 bg-zinc-950/80 shadow-[0_0_40px_-15px_rgba(16,185,129,0.05)]' : 
+      'border-zinc-800 bg-zinc-950/40'
+    } p-6`}>
       <div className="flex items-start justify-between border-b border-zinc-900 pb-4">
         <div>
-          <div className="text-[10px] font-bold uppercase tracking-[0.25em] text-zinc-600">Decision Gate</div>
-          <h3 className="mt-1 text-sm font-black text-zinc-100">{task}</h3>
-        </div>
-        <div className="flex flex-col items-end gap-2 text-right">
-          <DecisionBadge status={decision.promotion_status} />
           <div className="flex items-center gap-2">
-            {view.has_locked && (
-               <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-blue-500">
-                 <LockIcon className="h-3 w-3" /> LOCKED
-               </span>
+            <h3 className="text-sm font-black text-zinc-100">{task}</h3>
+            {is_active && (
+              <div className="flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[8px] font-black text-emerald-400 ring-1 ring-inset ring-emerald-500/20">
+                <CheckCircle2 className="h-2 w-2" />
+                ACTIVE DEFAULT
+              </div>
             )}
-            {!view.has_locked && (
-               <span className="text-[9px] font-black uppercase tracking-widest text-zinc-600">PROJECTED</span>
+            {has_locked && !is_active && (
+              <div className="rounded-full bg-zinc-800 px-2 py-0.5 text-[8px] font-black tracking-widest text-zinc-400 uppercase">
+                 Governance Locked
+              </div>
             )}
-            {view.has_drift && (
-               <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-amber-500">
-                 <ShieldAlert className="h-3 w-3" /> DRIFT: {view.drift_type}
-               </span>
+            {!has_locked && (
+              <div className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[8px] font-black tracking-widest text-blue-400 ring-1 ring-inset ring-blue-500/20 uppercase">
+                 Projected
+              </div>
             )}
           </div>
+          <div className="mt-1 text-[9px] font-bold uppercase tracking-widest text-zinc-600">
+             {tsLabel}: {timestamp ? new Date(timestamp).toLocaleString() : '---'}
+          </div>
+        </div>
+        <div className="flex flex-col items-end gap-2 text-right">
+          <DecisionBadge status={effective.promotion_status} />
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <MiniMetric title="Winner" value={decision.winner_model ?? '—'} subvalue={decision.winner_score?.toFixed(3)} color="text-cyan-500" />
-        <MiniMetric title="Runner Up" value={decision.runner_up_model ?? '—'} subvalue={decision.runner_up_score?.toFixed(3)} />
-        <MiniMetric title="Margin" value={decision.margin?.toFixed(3) ?? '—'} subvalue="Required: 0.150+" />
-        <MiniMetric title="Source Date" value={decision.locked ? (decision.locked_at ? new Date(decision.locked_at).toLocaleDateString() : '—') : (decision.evaluated_at ? new Date(decision.evaluated_at).toLocaleDateString() : '—')} subvalue={decision.locked ? 'Locked Date' : 'Evaluate Date'} />
+        <MiniMetric title="Winner" value={effective.winner_model ?? '--'} subvalue={effective.winner_score?.toFixed(3)} color="text-cyan-500" />
+        <MiniMetric title="Runner Up" value={effective.runner_up_model ?? '--'} subvalue={effective.runner_up_score?.toFixed(3)} />
+        <MiniMetric title="Margin" value={effective.margin?.toFixed(3) ?? '--'} subvalue={`Req: ${effective.thresholds_used?.margin_min ?? '0.150'}+`} />
+        <div className="flex flex-col gap-1 rounded-2xl border border-zinc-900 bg-zinc-900/10 p-3">
+          <span className="text-[8px] font-bold uppercase tracking-widest text-zinc-600">Actor</span>
+          <span className="text-xs font-bold truncate text-zinc-400">{effective.actor ?? (has_locked ? 'system' : '--')}</span>
+        </div>
       </div>
 
-      <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-5">
-        <GateCheck label="Evidence" passed={decision.checks?.evidence_pass ?? false} />
-        <GateCheck label="Reliability" passed={decision.checks?.reliability_pass ?? false} />
-        <GateCheck label="Stability" passed={decision.checks?.stability_pass ?? false} />
-        <GateCheck label="Margin" passed={decision.checks?.margin_pass ?? false} />
-        <GateCheck label="Gov Clear" passed={decision.checks?.governance_clear ?? false} />
+      <div className="grid gap-2 lg:grid-cols-5">
+        <GateBadge label="Evidence" pass={effective.checks?.evidence_pass} />
+        <GateBadge label="Reliability" pass={effective.checks?.reliability_pass} />
+        <GateBadge label="Stability" pass={effective.checks?.stability_pass} />
+        <GateBadge label="Margin" pass={effective.checks?.margin_pass} />
+        <GateBadge label="Governance" pass={effective.checks?.governance_clear} />
       </div>
 
-      {winner && (
+      {effective.winner_snapshot && (
         <div className="rounded-2xl border border-zinc-900 bg-zinc-900/20 p-4">
           <div className="flex items-center justify-between mb-3 text-[9px] font-bold uppercase tracking-widest text-zinc-600">
-            <span>Winner Snapshot</span>
-            <span className="text-zinc-400">{winner.label.replaceAll('_', ' ')}</span>
+            <span>Winner Performance</span>
+            <span className="text-zinc-500">{effective.winner_snapshot.label.replaceAll('_', ' ')}</span>
           </div>
           <div className="grid grid-cols-4 gap-4">
-            <MetricBlock label="Power" value={`${Math.round(winner.power * 100)}%`} />
-            <MetricBlock label="Yield" value={`${Math.round(winner.yield * 100)}%`} />
-            <MetricBlock label="Stability" value={`${Math.round(winner.stability * 100)}%`} />
-            <MetricBlock label="Reliability" value={`${Math.round(winner.reliability * 100)}%`} />
+            <MetricBlock label="Power" value={`${Math.round(effective.winner_snapshot.power * 100)}%`} />
+            <MetricBlock label="Yield" value={`${Math.round(effective.winner_snapshot.yield * 100)}%`} />
+            <MetricBlock label="Stability" value={`${Math.round(effective.winner_snapshot.stability * 100)}%`} />
+            <MetricBlock label="Reliability" value={`${Math.round(effective.winner_snapshot.reliability * 100)}%`} />
           </div>
         </div>
       )}
 
-      <div className="space-y-1">
-        <div className="flex items-center gap-2 text-[9px] font-bold uppercase tracking-widest text-zinc-600">
-          <ShieldAlert className="h-3 w-3" /> Reason
-        </div>
-        <p className="text-[10px] leading-relaxed text-zinc-400 italic">"{decision.reason}"</p>
-      </div>
-
-      {view.has_drift && (
-        <div className="rounded-xl border border-amber-900/30 bg-amber-950/20 p-3 text-[10px] text-amber-500">
-          <strong>DRIFT DETECTED:</strong> {view.drift_reason}
+      {has_drift && (
+        <div className="rounded-xl border border-amber-900/30 bg-amber-950/20 p-3 text-[10px] text-amber-500 flex items-start gap-2">
+          <ShieldAlert className="h-3 w-3 mt-0.5 shrink-0" />
+          <div className="space-y-0.5">
+            <div className="font-black uppercase tracking-widest">DRIFT: {drift_type.replaceAll('_', ' ')}</div>
+            <p className="opacity-90">{drift_reason}</p>
+          </div>
         </div>
       )}
 
       <div className="mt-auto flex items-center justify-between pt-4 border-t border-zinc-900">
-         <div className="text-[9px] font-mono text-zinc-600 max-w-[50%] truncate">
-            {decision.decision_path ?? 'No audit artifact'}
+         <div className="text-[9px] font-mono text-zinc-700 max-w-[40%] truncate">
+            {effective.decision_path ? `artifact://${effective.task}.json` : 'projection://live'}
          </div>
-         <button 
-           onClick={onLock}
-           disabled={isLocking}
-           className="px-4 py-2 rounded-xl bg-zinc-100 text-zinc-950 text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all disabled:opacity-30"
-         >
-           {isLocking ? 'LOCKING...' : view.has_locked ? 'Update Governance' : 'Lock Governance'}
-         </button>
+         <div className="flex gap-2">
+           {has_locked ? (
+              <>
+                 {!is_active && (
+                   <button 
+                     onClick={onPromote}
+                     disabled={isPromoting}
+                     className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 text-white text-[10px] font-black uppercase tracking-widest hover:bg-emerald-500 transition-all disabled:opacity-30"
+                   >
+                     {isPromoting ? <RotateCw className="h-3 w-3 animate-spin" /> : <BoxSelect className="h-3 w-3" />}
+                     Apply Winner
+                   </button>
+                 )}
+                 {is_active && (
+                    <button 
+                    onClick={onRevoke}
+                    disabled={isPromoting}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl border border-red-500/30 bg-red-950/20 text-red-500 text-[10px] font-black uppercase tracking-widest hover:bg-red-900/30 transition-all disabled:opacity-30"
+                  >
+                    {isPromoting ? <RotateCw className="h-3 w-3 animate-spin" /> : <Undo2 className="h-3 w-3" />}
+                    Revoke
+                  </button>
+                 )}
+                 <button 
+                   onClick={onLock}
+                   disabled={isLocking || !view.projected}
+                   className="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 text-[10px] font-black uppercase tracking-widest hover:text-white transition-all disabled:opacity-30"
+                 >
+                   {isLocking ? <RotateCw className="h-3 w-3 animate-spin" /> : 'Re-Lock'}
+                 </button>
+              </>
+           ) : (
+             <button 
+               onClick={onLock}
+               disabled={isLocking || !lock_available}
+               className="flex items-center gap-2 px-6 py-2 rounded-xl bg-zinc-100 text-zinc-950 text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all disabled:opacity-30"
+             >
+               {isLocking ? <RotateCw className="h-3 w-3 animate-spin" /> : <LockKeyhole className="h-3 w-3" />}
+               Lock Decision
+             </button>
+           )}
+         </div>
       </div>
     </div>
   );
@@ -589,6 +675,8 @@ export default function App() {
   const [decisionsErr, setDecisionsErr] = useState<ApiError | null>(null);
 
   const [isLocking, setIsLocking] = useState<string | null>(null);
+  const [isPromoting, setIsPromoting] = useState<string | null>(null);
+  const [operatorName, setOperatorName] = useState<string>('');
 
   const fetchJson = async (path: string, options?: RequestInit) => {
     const resp = await fetch(path, options);
@@ -725,12 +813,51 @@ export default function App() {
     setIsLocking(task);
     try {
       const url = `/api/tasks/${task}/decide${hasLocked ? '?force=true' : ''}`;
-      await fetchJson(url, { method: 'POST' });
+      await fetchJson(url, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actor: operatorName || 'manual_operator' })
+      });
       await refreshData();
     } catch (e: any) {
       alert(`Decision Lock Failed: ${e.message || JSON.stringify(e)}`);
     } finally {
       setIsLocking(null);
+    }
+  };
+
+  const handlePromote = async (task: string) => {
+    setIsPromoting(task);
+    try {
+      await fetchJson(`/api/tasks/${task}/promote`, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actor: operatorName || 'manual_operator' })
+      });
+      await refreshData();
+    } catch (e: any) {
+      alert(`Promotion Failed: ${e.message}`);
+    } finally {
+      setIsPromoting(null);
+    }
+  };
+
+  const handleRevoke = async (task: string) => {
+    if (!confirm(`Revoke active promotion for task "${task}"? This will clear the authoritative default mapping.`)) {
+      return;
+    }
+    setIsPromoting(task);
+    try {
+      await fetchJson(`/api/tasks/${task}/revoke`, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actor: operatorName || 'manual_operator' })
+      });
+      await refreshData();
+    } catch (e: any) {
+      alert(`Revocation Failed: ${e.message}`);
+    } finally {
+      setIsPromoting(null);
     }
   };
 
@@ -878,6 +1005,52 @@ export default function App() {
                 <Database className="h-8 w-8 mb-3 opacity-20" />
                 <div className="text-sm font-medium">Insufficient data for model comparison.</div>
                 <div className="text-[10px] uppercase tracking-widest mt-1">Requires at least one Task with multiple model regimes.</div>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Model Promotion Console */}
+        <section className="flex flex-col gap-4 lg:col-span-2">
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div className="flex items-center gap-2 px-1 text-emerald-500">
+              <ShieldCheck className="h-4 w-4" />
+              <h2 className="text-xs font-bold uppercase tracking-[0.25em]">Model Promotion Console</h2>
+            </div>
+            
+            <div className="flex items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/50 px-4 py-2">
+              <span className="text-[10px] font-black uppercase tracking-widest text-zinc-600">Operator Instance</span>
+              <input 
+                 type="text" 
+                 placeholder="Operator ID (Default: manual_operator)"
+                 value={operatorName}
+                 onChange={(e) => setOperatorName(e.target.value)}
+                 className="w-48 border-none bg-transparent p-0 text-[11px] font-black text-emerald-400 placeholder:text-zinc-700 focus:ring-0"
+              />
+            </div>
+          </div>
+          
+          <div className="grid gap-6 md:grid-cols-2">
+            {decisionsErr ? (
+              <div className="md:col-span-2"><ErrorBanner error={decisionsErr} /></div>
+            ) : decisions && Object.keys(decisions.tasks).length > 0 ? (
+              Object.entries(decisions.tasks).map(([task, view]) => (
+                <DecisionTaskCard 
+                  key={task} 
+                  task={task} 
+                  view={view} 
+                  onLock={() => handleLockDecision(task, view.has_locked)}
+                  onPromote={() => handlePromote(task)}
+                  onRevoke={() => handleRevoke(task)}
+                  isLocking={isLocking === task}
+                  isPromoting={isPromoting === task}
+                />
+              ))
+            ) : (
+              <div className="md:col-span-2 flex flex-col items-center justify-center rounded-3xl border border-zinc-800 border-dashed bg-zinc-950/30 py-12 text-zinc-600">
+                <Database className="h-8 w-8 mb-3 opacity-20" />
+                <div className="text-sm font-medium">No promotion decisions projected.</div>
+                <div className="text-[10px] uppercase tracking-widest mt-1">Requires at least 5 classified runs per Task.</div>
               </div>
             )}
           </div>
@@ -1110,36 +1283,6 @@ export default function App() {
                 </table>
               </div>
             )}
-          </div>
-        </section>
-
-        {/* Model Promotion Console (Decision Gate) */}
-        <section className="flex flex-col gap-4 lg:col-span-2">
-          <div className="flex items-center gap-2 px-1 text-emerald-500">
-            <LockIcon className="h-4 w-4" />
-            <h2 className="text-xs font-bold uppercase tracking-[0.25em]">Model Promotion Console</h2>
-          </div>
-          
-          <div className="grid gap-6 md:grid-cols-2">
-             {decisionsErr ? (
-               <div className="md:col-span-2"><ErrorBanner error={decisionsErr} /></div>
-             ) : (decisions && Object.keys(decisions.tasks).length > 0) ? (
-               Object.entries(decisions.tasks).map(([task, view]) => (
-                 <DecisionTaskCard 
-                   key={task} 
-                   task={task} 
-                   view={view} 
-                   onLock={() => handleLockDecision(task, view.has_locked)} 
-                   isLocking={isLocking === task}
-                 />
-               ))
-             ) : (
-               <div className="md:col-span-2 flex flex-col items-center justify-center rounded-3xl border border-zinc-800 border-dashed bg-zinc-950/30 py-12 text-zinc-600">
-                 <ShieldAlert className="h-8 w-8 mb-3 opacity-20" />
-                 <div className="text-sm font-medium">No promotion decisions projected.</div>
-                 <div className="text-[10px] uppercase tracking-widest mt-1">Requires at least 5 classified runs per Task.</div>
-               </div>
-             )}
           </div>
         </section>
 

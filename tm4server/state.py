@@ -16,6 +16,15 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def get_system_actor() -> str:
+    """Returns the local OS username for system-level audit context."""
+    import getpass
+    try:
+        return getpass.getuser()
+    except Exception:
+        return "unknown"
+
+
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomic write using a temporary file and rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +113,7 @@ class StatePaths:
     status_json: Path
     control_json: Path
     control_history_jsonl: Path
+    active_run_json: Path
 
     @classmethod
     def from_runtime_root(cls, runtime_root: Path) -> "StatePaths":
@@ -113,6 +123,7 @@ class StatePaths:
             status_json=state_root / "status.json",
             control_json=state_root / "control.json",
             control_history_jsonl=state_root / "control_history.jsonl",
+            active_run_json=state_root / "active_run.json",
         )
 
 
@@ -125,18 +136,17 @@ class StateManager:
         # Defaults are ensured during explicit bootstrap or writer startup (e.g. worker).
 
     def ensure_defaults(self) -> None:
-        """Ensures that the control.json file exists with a valid default."""
+        """Ensures that the control.json file exists with a safe default."""
         if not self.paths.control_json.exists():
-            self.set_control_mode("run", source="system_init")
+            self.set_control_mode("pause", source="system_init")
 
     def read_control_mode(self) -> str:
         """Reads current control mode. 
-        Returns 'run' if file is missing.
-        Raises JSONDecodeError/ValueError if file is corrupted or semantically invalid.
+        Returns 'pause' if file is missing (Safe Default).
         """
         payload = read_json_safe(
             self.paths.control_json,
-            {"control_version": 1, "mode": "run"},
+            {"control_version": 1, "mode": "pause"},
         )
         
         mode = payload.get("mode")
@@ -144,6 +154,10 @@ class StateManager:
             raise ValueError(f"Invalid or missing control mode in state file: {mode}")
         
         return mode
+    
+    def get_control_state(self) -> str:
+        """Helper to get current control mode."""
+        return self.read_control_mode()
 
     def set_control_mode(self, mode: str, source: str = "manual") -> None:
         if mode not in {"run", "pause", "halt"}:
@@ -274,10 +288,10 @@ class StateManager:
             return summary
             
         for d in runs_dir.iterdir():
-            if not d.is_dir() or not d.name.startswith("EXP"):
+            if not d.is_dir() or not (d.name.startswith("RUN-") or d.name.startswith("EXP")):
                 continue
                 
-            state_file = d / "runtime_state.json"
+            state_file = d / "status.json"
             summary_file = d / "run_summary.json"
             
             if summary_file.exists():
@@ -305,10 +319,11 @@ class StateManager:
                         summary["pending"] += 1
                     elif status == "interrupted":
                         summary["interrupted"] += 1
+                    else:
+                        summary["pending"] += 1
                 except Exception:
                     summary["pending"] += 1
             else:
-                # Dir exists but no state file yet (race or partial creation)
                 summary["pending"] += 1
         
         return summary
@@ -320,14 +335,14 @@ class StateManager:
             
         pending_runs = []
         for d in runs_dir.iterdir():
-            if not d.is_dir() or not d.name.startswith("EXP"):
+            if not d.is_dir() or not (d.name.startswith("RUN-") or d.name.startswith("EXP")):
                 continue
             
             # Terminal check
             if (d / "run_summary.json").exists():
                 continue
                 
-            state_file = d / "runtime_state.json"
+            state_file = d / "status.json"
             if not state_file.exists():
                 # Partial dir creation or legacy queued run?
                 # We prioritize folders with a proper manifest
@@ -366,10 +381,10 @@ class StateManager:
             
         interrupted_count = 0
         for d in runs_dir.iterdir():
-            if not d.is_dir() or not d.name.startswith("EXP"):
+            if not d.is_dir() or not (d.name.startswith("RUN-") or d.name.startswith("EXP")):
                 continue
                 
-            state_file = d / "runtime_state.json"
+            state_file = d / "status.json"
             summary_file = d / "run_summary.json"
             
             # If summary exists, it's terminal.
@@ -414,11 +429,11 @@ class StateManager:
             
         runs = []
         for d in runs_dir.iterdir():
-            if not d.is_dir() or not d.name.startswith("EXP"):
+            if not d.is_dir() or not (d.name.startswith("RUN-") or d.name.startswith("EXP")):
                 continue
                 
             manifest_path = d / "run_manifest.json"
-            state_path = d / "runtime_state.json"
+            state_path = d / "status.json"
             summary_path = d / "run_summary.json"
             
             # 1. Base Metadata from Manifest
@@ -448,22 +463,22 @@ class StateManager:
             
             # 4. Normalized Row
             run = {
-                "exp_id": d.name,
+                "run_id": manifest.get("run_id", d.name),
+                "exp_id": manifest.get("exp_id"),
                 "status": status,
                 "classification_label": classification.get("label"),
                 "classification_confidence": classification.get("confidence"),
                 "created_at": manifest.get("created_at") or manifest.get("submitted_at"),
-                "started_at": state.get("started_at"),
-                "completed_at": summary.get("ts_utc") or state.get("completed_at") or state.get("failed_at"),
-                "task": manifest.get("task", "unknown"),
-                "model": manifest.get("model", "unknown"),
+                "started_at": state.get("started_at") or manifest.get("started_at"),
+                "completed_at": summary.get("completed_at") or state.get("completed_at"),
+                "workload_type": manifest.get("workload_type", manifest.get("task", "unknown")),
                 "requested_by": manifest.get("requested_by", "unknown"),
                 "failure_reason": summary.get("error") or state.get("failure_reason") or state.get("error"),
                 "has_summary": summary_path.exists(),
                 "has_results": (d / "results.json").exists(),
                 "has_stdout": (d / "stdout.log").exists(),
                 "has_stderr": (d / "stderr.log").exists(),
-                "duration_s": None # TODO: calculate if needed
+                "duration_s": summary.get("duration_s")
             }
             runs.append(run)
             
@@ -474,6 +489,65 @@ class StateManager:
         runs.sort(key=sort_key, reverse=True)
         return runs[:limit]
 
+    # --- Execution Awareness ---
+
+    def get_active_run(self) -> dict[str, Any] | None:
+        """Reads active_run.json if it exists.
+        Missing file returns None. Corruption is not silently ignored.
+        """
+        try:
+            return read_json_strict(self.paths.active_run_json)
+        except FileNotFoundError:
+            return None
+
+    def set_active_run(self, run_id: str, data: dict[str, Any]) -> None:
+        """Authoritatively writes active_run.json."""
+        payload = data.copy()
+        payload["run_id"] = run_id
+        payload["updated_at_utc"] = utc_now_iso()
+        atomic_write_json(self.paths.active_run_json, payload)
+
+    def clear_active_run(self) -> None:
+        """Removes the active_run.json truth anchor."""
+        if self.paths.active_run_json.exists():
+            try:
+                os.remove(self.paths.active_run_json)
+            except OSError:
+                pass
+
+    def is_runtime_busy(self) -> bool:
+        """Checks if a run is currently active based on active_run.json."""
+        return self.paths.active_run_json.exists()
+
+    def set_runtime_execution_status(
+        self,
+        runtime_state: str,
+        current_run_id: str | None = None,
+        last_completed_run_id: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Writes global execution-aware status for the worker."""
+        current = self.read_status()
+
+        payload: dict[str, Any] = {
+            "status_version": 1,
+            "ts_utc": utc_now_iso(),
+            "instance_id": socket.gethostname(),
+            "worker_pid": os.getpid(),
+            "tm4server_version": git_short_commit(self.tm4server_repo) if self.tm4server_repo else current.get("tm4server_version"),
+            "tm4core_version": git_short_commit(self.tm4core_repo) if self.tm4core_repo else current.get("tm4core_version"),
+            "runtime_state": runtime_state,
+            "current_run_id": current_run_id,
+            "last_completed_run_id": last_completed_run_id if last_completed_run_id is not None else current.get("last_completed_run_id"),
+        }
+
+        payload_extra = current.get("extra", {}).copy()
+        if extra:
+            payload_extra.update(extra)
+        payload["extra"] = payload_extra
+
+        atomic_write_json(self.paths.status_json, payload)
+
     def get_run_detail(self, runs_dir: Path, exp_id: str) -> dict[str, Any]:
         """Returns the full raw JSON payloads for a specific run."""
         run_dir = runs_dir / exp_id
@@ -481,9 +555,9 @@ class StateManager:
             raise FileNotFoundError(f"Run directory not found: {exp_id}")
             
         return {
-            "exp_id": exp_id,
+            "run_id": exp_id,
             "manifest": read_json_safe(run_dir / "run_manifest.json", {}),
-            "runtime_state": read_json_safe(run_dir / "runtime_state.json", {}),
+            "status": read_json_safe(run_dir / "status.json", {}),
             "summary": read_json_safe(run_dir / "run_summary.json", {}),
             "classification": read_json_safe(run_dir / "classification.json", {}).get("classification")
         }
@@ -502,7 +576,7 @@ class StateManager:
         groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
         
         for d in runs_dir.iterdir():
-            if not d.is_dir() or not d.name.startswith("EXP"):
+            if not d.is_dir() or not (d.name.startswith("RUN-") or d.name.startswith("EXP")):
                 continue
                 
             manifest_path = d / "run_manifest.json"

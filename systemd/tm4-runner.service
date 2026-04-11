@@ -1,21 +1,19 @@
 [Unit]
-Description=TM4 Runner Service
+Description=TM4 Execution Runner
 After=network.target
 
 [Service]
 Type=simple
-User=YOUR_LINUX_USER
+User=root
 WorkingDirectory=/opt/tm4server
-Environment=TM4_BASE_PATH=/var/lib/tm4
-Environment=TM4_POLL_INTERVAL_S=3
-Environment=TM4_CORE_PATH=/opt/tm4-core
-Environment=TM4_AUTONOMY_SCRIPT=/opt/tm4-core/mvp/scripts/run_autonomy_loop.py
-Environment=TM4_PYTHON_BIN=/opt/tm4-core/venv/bin/python
-ExecStart=/opt/tm4server/venv/bin/python -m tm4server.worker
+# Environment variables for the worker
+Environment=TM4_RUNTIME_ROOT=/var/lib/tm4
+Environment=TM4SERVER_REPO_ROOT=/opt/tm4server
+Environment=TM4CORE_REPO_ROOT=/opt/tm4-core
+# Use the virtualenv python
+ExecStart=/opt/tm4server/venv/bin/python -m tm4server.execution.worker
 Restart=always
 RestartSec=5
-StandardOutput=append:/var/log/tm4/tm4-runner.log
-StandardError=append:/var/log/tm4/tm4-runner.log
 
 [Install]
 WantedBy=multi-user.target
