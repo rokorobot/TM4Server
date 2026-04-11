@@ -8,8 +8,8 @@ def build_tm4_command(tm4core_repo: Path, run_dir: Path) -> tuple[list[str], dic
     Normalizes the contract between TM4Server and TM4 core.
     Maps a run_dir into a subprocess launch specification.
     """
-    # Use the current python executable if in venv, fall back to python3
-    python_bin = sys.executable or "python3"
+    # Explicitly lock to the production venv for Phase 2B
+    python_bin = "/opt/tm4-core/venv/bin/python"
     
     # The canonical entrypoint for Phase 2A
     cmd = [

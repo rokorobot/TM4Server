@@ -35,10 +35,9 @@ interface ApiError {
 }
 
 interface StatusInfo {
-  runtime_state: 'idle' | 'running' | 'paused' | 'halted' | 'error';
-  current_exp_id: string | null;
-  queue_depth: number;
-  last_completed_exp_id: string | null;
+  runtime_state: 'idle' | 'busy';
+  current_run_id: string | null;
+  last_completed_run_id: string | null;
   pending: number;
   running: number;
   completed: number;
@@ -58,13 +57,15 @@ interface HistoryItem {
 }
 
 interface RunInfo {
+  run_id: string;
   exp_id: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
+  is_terminal: boolean;
   created_at: string;
   started_at?: string;
   completed_at?: string;
-  task: string;
-  model: string;
+  duration_s?: number | null;
+  workload_type: string;
   requested_by: string;
   failure_reason?: string;
   has_summary: boolean;
@@ -76,9 +77,9 @@ interface RunInfo {
 }
 
 interface RunDetail {
-  exp_id: string;
+  run_id: string;
   manifest: any;
-  runtime_state: any;
+  status: any;
   summary: any;
   classification: any;
 }
@@ -635,6 +636,60 @@ function EvidenceItem({ label, value, unit = '' }: { label: string; value: any; 
   );
 }
 
+function LogPreview({ runId, stream, loading, onToggle }: { runId: string; stream: 'stdout' | 'stderr'; loading: boolean; onToggle: (s: 'stdout' | 'stderr') => void }) {
+  const [logData, setLogData] = useState<{ content: string; truncated: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const fetchLog = async () => {
+      try {
+        const resp = await fetch(`/api/runs/${runId}/logs?stream=${stream}&tail=100`);
+        const data = await resp.json();
+        if (active) {
+            if (data.ok) setLogData(data);
+            else setError(data.error?.message || 'Failed to load logs');
+        }
+      } catch (e: any) {
+        if (active) setError(e.message);
+      }
+    };
+    fetchLog();
+    return () => { active = false; };
+  }, [runId, stream]);
+
+  return (
+    <div className="flex flex-col gap-2 rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Forensics: {stream}</span>
+            <div className="flex rounded-lg bg-zinc-900 p-0.5">
+                <button 
+                    onClick={() => onToggle('stdout')}
+                    className={`px-3 py-1 text-[9px] font-black uppercase rounded-md transition ${stream === 'stdout' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-600 hover:text-zinc-400'}`}
+                >stdout</button>
+                <button 
+                    onClick={() => onToggle('stderr')}
+                    className={`px-3 py-1 text-[9px] font-black uppercase rounded-md transition ${stream === 'stderr' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-600 hover:text-zinc-400'}`}
+                >stderr</button>
+            </div>
+        </div>
+        {logData?.truncated && <span className="text-[8px] font-bold text-amber-500/60 uppercase tracking-widest">Truncated (Last 100)</span>}
+      </div>
+      
+      {error ? (
+        <div className="py-8 text-center text-red-500/50 text-[10px] uppercase font-bold">{error}</div>
+      ) : !logData ? (
+        <div className="flex items-center justify-center py-12"><Loader2 className="h-4 w-4 animate-spin text-zinc-800" /></div>
+      ) : (
+        <pre className="max-h-[300px] overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-zinc-400 selection:bg-emerald-500/20">
+            {logData.content || '--- Empty Stream ---'}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 // --- Main App ---
 
 export default function App() {
@@ -677,6 +732,7 @@ export default function App() {
   const [isLocking, setIsLocking] = useState<string | null>(null);
   const [isPromoting, setIsPromoting] = useState<string | null>(null);
   const [operatorName, setOperatorName] = useState<string>('');
+  const [logStream, setLogStream] = useState<'stdout' | 'stderr'>('stdout');
 
   const fetchJson = async (path: string, options?: RequestInit) => {
     const resp = await fetch(path, options);
@@ -770,9 +826,12 @@ export default function App() {
 
   useEffect(() => {
     refreshData();
-    const timer = setInterval(refreshData, POLL_INTERVAL);
+    // Phase 2B: Smart Polling
+    // 3s while busy/running, 15s while idle
+    const currentInterval = status?.runtime_state === 'busy' ? 3000 : 15000;
+    const timer = setInterval(refreshData, currentInterval);
     return () => clearInterval(timer);
-  }, [refreshData]);
+  }, [refreshData, status?.runtime_state]);
 
   const handleControl = async (mode: string) => {
     setControlInFlight(true);
@@ -794,11 +853,12 @@ export default function App() {
     setLaunchErr(null);
     setLastLaunchId(null);
     try {
-      const data = await fetchJson('/api/runs/launch', { method: 'POST' });
-      setLastLaunchId(data.exp_id);
+      // Phase 2B: Rewired to the one-shot control/run API
+      const data = await fetchJson('/api/control/run', { method: 'POST' });
+      setLastLaunchId('Intent Sent'); 
       await refreshData();
       // Auto-clear success message after 10s
-      setTimeout(() => setLastLaunchId(prev => prev === data.exp_id ? null : prev), 10000);
+      setTimeout(() => setLastLaunchId(null), 10000);
     } catch (e: any) {
       setLaunchErr(e);
     } finally {
@@ -861,18 +921,18 @@ export default function App() {
     }
   };
 
-  const toggleRunDetail = async (expId: string) => {
-    if (selectedRunId === expId) {
+  const toggleRunDetail = async (runId: string) => {
+    if (selectedRunId === runId) {
       setSelectedRunId(null);
       setRunDetail(null);
       return;
     }
     
-    setSelectedRunId(expId);
+    setSelectedRunId(runId);
     setDetailLoading(true);
     setRunDetail(null);
     try {
-      const data = await fetchJson(`/api/runs/${expId}`);
+      const data = await fetchJson(`/api/runs/${runId}`);
       setRunDetail(data.detail);
     } catch (e: any) {
       console.error(e);
@@ -881,12 +941,12 @@ export default function App() {
     }
   };
 
-  const handleClassify = async (expId: string) => {
+  const handleClassify = async (runId: string) => {
     setDetailLoading(true);
     try {
-      await fetchJson(`/api/runs/${expId}/classify`, { method: 'POST' });
+      await fetchJson(`/api/runs/${runId}/classify`, { method: 'POST' });
       // Refresh detail and list
-      const data = await fetchJson(`/api/runs/${expId}`);
+      const data = await fetchJson(`/api/runs/${runId}`);
       setRunDetail(data.detail);
       const r = await fetchJson('/api/runs?limit=100');
       setRuns(r.items);
@@ -933,17 +993,16 @@ export default function App() {
           
           <div className="grid gap-4 sm:grid-cols-2">
             <div className={`rounded-2xl border px-5 py-4 transition-colors ${
-              status?.runtime_state === 'running' ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-400' :
-              status?.runtime_state === 'paused' ? 'border-amber-500/30 bg-amber-500/5 text-amber-400' :
-              status?.runtime_state === 'halted' ? 'border-red-500/30 bg-red-500/5 text-red-400' :
+              status?.runtime_state === 'busy' ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-400' :
+              status?.runtime_state === 'idle' ? 'border-zinc-800 bg-zinc-900/40 text-zinc-500' :
               'border-zinc-800 bg-zinc-900/40 text-zinc-500'
             }`}>
               <div className="text-[10px] font-bold uppercase tracking-[0.2em] opacity-60">Engine State</div>
               <div className="mt-1 text-xl font-black uppercase tracking-tight">{status?.runtime_state ?? 'Unknown'}</div>
             </div>
-            <StatItem label="Active ID" value={status?.current_exp_id ?? 'None'} />
-            <StatItem label="Pending" value={status?.pending ?? 0} />
-            <StatItem label="Last Completed" value={status?.last_completed_exp_id ?? 'None'} />
+             <StatItem label="Active ID" value={status?.current_run_id ?? 'None'} />
+             <StatItem label="Pending" value={status?.pending ?? 0} />
+             <StatItem label="Last Completed" value={status?.last_completed_run_id ?? 'None'} />
             <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-3 grid grid-cols-3 gap-2">
                <div className="flex flex-col items-center">
                   <span className="text-[8px] font-bold text-zinc-600 uppercase">Succ</span>
@@ -1182,35 +1241,35 @@ export default function App() {
                 <table className="w-full text-left text-sm">
                   <thead className="sticky top-0 border-b border-zinc-800 bg-zinc-950/80 text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500 backdrop-blur-md">
                     <tr>
-                      <th className="px-6 py-4">EXP ID</th>
+                      <th className="px-6 py-4">Run ID</th>
                       <th className="px-6 py-4">Status</th>
+                      <th className="px-6 py-4 text-center">Duration</th>
                       <th className="px-6 py-4">Interpretation</th>
                       <th className="px-6 py-4">Created</th>
-                      <th className="px-6 py-4 text-center">Artifacts</th>
+                      <th className="px-6 py-4">Failure Reason</th>
                       <th className="px-6 py-4 text-right">Actions</th>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-900 border-zinc-800">
+                  </thead>                  <tbody className="divide-y divide-zinc-900 border-zinc-800">
                     {runs.length > 0 ? runs.map((r) => (
-                      <Fragment key={r.exp_id}>
-                        <tr className={`hover:bg-zinc-900/20 cursor-pointer ${selectedRunId === r.exp_id ? 'bg-zinc-900/40 border-l-2 border-blue-500' : ''}`} onClick={() => toggleRunDetail(r.exp_id)}>
-                          <td className="whitespace-nowrap px-6 py-3 font-mono font-bold text-zinc-100">{r.exp_id}</td>
+                      <Fragment key={r.run_id}>
+                        <tr className={`hover:bg-zinc-900/20 cursor-pointer ${selectedRunId === r.run_id ? 'bg-zinc-900/40 border-l-2 border-blue-500' : ''}`} onClick={() => toggleRunDetail(r.run_id)}>
+                          <td className="whitespace-nowrap px-6 py-3 font-mono font-bold text-zinc-100">{r.run_id}</td>
                           <td className="px-6 py-3"><StatusBadge status={r.status} /></td>
+                          <td className="px-6 py-3 text-center font-mono text-[11px] text-zinc-400">
+                             {r.duration_s !== undefined && r.duration_s !== null ? `${r.duration_s}s` : '--'}
+                          </td>
                           <td className="px-6 py-3"><ScientificBadge label={r.classification_label} /></td>
                           <td className="whitespace-nowrap px-6 py-3 font-mono text-[11px] text-zinc-500">{r.created_at}</td>
-                          <td className="px-6 py-3 text-center">
-                            <div className="flex justify-center gap-2">
-                              {r.has_summary && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
-                              {r.has_stdout && <div className="h-2 w-2 rounded-full border border-zinc-700" title="stdout.log" />}
-                            </div>
+                          <td className="px-6 py-3 max-w-[200px] truncate text-[10px] font-medium text-red-500/70">
+                             {r.failure_reason || ''}
                           </td>
                           <td className="px-6 py-3 text-right text-zinc-600">
-                             {selectedRunId === r.exp_id ? <ChevronDown className="h-4 w-4 inline" /> : <ChevronRight className="h-4 w-4 inline" />}
+                             {selectedRunId === r.run_id ? <ChevronDown className="h-4 w-4 inline" /> : <ChevronRight className="h-4 w-4 inline" />}
                           </td>
                         </tr>
-                        {selectedRunId === r.exp_id && (
+                        {selectedRunId === r.run_id && (
                           <tr>
-                            <td colSpan={6} className="bg-zinc-900/30 p-6 shadow-inner animate-in fade-in slide-in-from-top-1 duration-300">
+                            <td colSpan={7} className="bg-zinc-900/30 p-6 shadow-inner animate-in fade-in slide-in-from-top-1 duration-300">
                               {detailLoading ? (
                                 <div className="flex items-center justify-center py-12">
                                   <Loader2 className="h-6 w-6 animate-spin text-zinc-600" />
@@ -1218,7 +1277,7 @@ export default function App() {
                               ) : runDetail ? (
                                 <div className="grid gap-6 md:grid-cols-4">
                                   <JsonView title="Manifest (Launch Intent)" data={runDetail.manifest} />
-                                  <JsonView title="Runtime State (Lifecycle)" data={runDetail.runtime_state} />
+                                  <JsonView title="Execution Status (Lifecycle)" data={runDetail.status} />
                                   <JsonView title="Run Summary (Evidence)" data={runDetail.summary} />
                                   
                                   {/* Classification Pane */}
@@ -1249,7 +1308,7 @@ export default function App() {
                                       <div className="flex flex-1 flex-col items-center justify-center gap-2 py-4">
                                         <div className="text-[10px] text-zinc-600 italic">No scientific label assigned</div>
                                         <button 
-                                          onClick={(e) => { e.stopPropagation(); handleClassify(r.exp_id); }}
+                                          onClick={(e) => { e.stopPropagation(); handleClassify(r.run_id); }}
                                           disabled={r.status === 'queued' || r.status === 'running' || !r.has_summary}
                                           className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-1.5 text-[10px] font-black uppercase text-zinc-300 transition hover:bg-zinc-800 disabled:opacity-20"
                                         >
@@ -1258,15 +1317,8 @@ export default function App() {
                                       </div>
                                     )}
                                   </div>
-
-                                  <div className="md:col-span-4 flex justify-between items-center pt-4 border-t border-zinc-800">
-                                      <span className="text-[10px] font-bold uppercase text-zinc-600 flex items-center gap-2">
-                                        Logs: {r.has_stdout ? <span className="text-zinc-400 underline cursor-pointer hover:text-white">stdout.log</span> : 'none'}
-                                      </span>
-                                      <div className="flex gap-2">
-                                         <button disabled className="rounded-md bg-zinc-800 px-3 py-1 text-[10px] font-bold text-zinc-400 hover:bg-zinc-700 disabled:opacity-30">Forensics</button>
-                                         <button disabled className="rounded-md bg-zinc-800 px-3 py-1 text-[10px] font-bold text-zinc-400 hover:bg-zinc-700 disabled:opacity-30">Replay</button>
-                                      </div>
+                                  <div className="md:col-span-4 mt-4">
+                                      <LogPreview runId={r.run_id} stream={logStream} loading={detailLoading} onToggle={setLogStream} />
                                   </div>
                                 </div>
                               ) : (
@@ -1277,9 +1329,10 @@ export default function App() {
                         )}
                       </Fragment>
                     )) : (
-                      <tr><td colSpan={6} className="px-6 py-12 text-center text-zinc-600 font-medium italic">No experiment runs found.</td></tr>
+                      <tr><td colSpan={7} className="px-6 py-12 text-center text-zinc-600 font-medium italic">No experiment runs found.</td></tr>
                     )}
                   </tbody>
+
                 </table>
               </div>
             )}

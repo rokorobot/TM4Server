@@ -251,13 +251,16 @@ async def get_run_detail(run_id: str):
                 }
             }
         )
-@router.post("/runs/{exp_id}/classify")
-async def classify_run(exp_id: str):
-    """Triggers deterministic semantic interpretation of a run based on terminal evidence."""
+@router.post("/runs/{run_id}/classify")
+async def classify_run(run_id: str):
+    """
+    Triggers scientific classification for a completed run.
+    Uses tm4-core's classification engine via classifier.py.
+    """
     try:
-        run_dir = RUNS_DIR / exp_id
+        run_dir = RUNS_DIR / run_id
         if not run_dir.exists():
-             raise FileNotFoundError(f"Run directory not found: {exp_id}")
+             raise FileNotFoundError(f"Run directory not found: {run_id}")
              
         summary_path = run_dir / "run_summary.json"
         if not summary_path.exists():
@@ -296,11 +299,66 @@ async def classify_run(exp_id: str):
             detail={"ok": False, "error": {"code": "CLASSIFY_ERROR", "message": str(e)}}
         )
 
-@router.get("/runs/{exp_id}/classification")
-async def get_run_classification(exp_id: str):
+@router.get("/runs/{run_id}/logs")
+async def get_run_logs(
+    run_id: str, 
+    stream: str = Query("stdout", regex="^(stdout|stderr)$"),
+    tail: int = Query(100, ge=1, le=1000)
+):
+    """Returns the last N lines of stdout or stderr for a specific run."""
+    try:
+        run_dir = RUNS_DIR / run_id
+        if not run_dir.exists():
+             raise FileNotFoundError(f"Run directory not found: {run_id}")
+             
+        log_file = run_dir / f"{stream}.log"
+        if not log_file.exists():
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "stream": stream,
+                "tail": tail,
+                "content": f"--- No {stream} log available ---",
+                "truncated": False
+            }
+            
+        # Read the tail of the file
+        # We read tail + 1 to accurately detect truncation
+        lines = []
+        with log_file.open("r", encoding="utf-8", errors="replace") as f:
+            from collections import deque
+            lines = list(deque(f, tail + 1))
+            
+        is_truncated = False
+        if len(lines) > tail:
+            is_truncated = True
+            lines = lines[1:] # Discard the extra line
+            
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "stream": stream,
+            "tail": tail,
+            "content": "".join(lines),
+            "truncated": is_truncated
+        }
+        
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=404,
+            detail={"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": str(e)}}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"ok": False, "error": {"code": "LOGS_READ_ERROR", "message": str(e)}}
+        )
+
+@router.get("/runs/{run_id}/classification")
+async def get_run_classification(run_id: str):
     """Returns previous scientific classification artifact if it exists."""
     try:
-        run_dir = RUNS_DIR / exp_id
+        run_dir = RUNS_DIR / run_id
         path = run_dir / "classification.json"
         
         if not path.exists():

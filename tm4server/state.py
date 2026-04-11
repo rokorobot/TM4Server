@@ -429,58 +429,77 @@ class StateManager:
             
         runs = []
         for d in runs_dir.iterdir():
-            if not d.is_dir() or not (d.name.startswith("RUN-") or d.name.startswith("EXP")):
-                continue
+            try:
+                if not d.is_dir() or not d.name.startswith("RUN-"):
+                    continue
+                    
+                manifest_path = d / "run_manifest.json"
+                state_path = d / "status.json"
+                summary_path = d / "run_summary.json"
                 
-            manifest_path = d / "run_manifest.json"
-            state_path = d / "status.json"
-            summary_path = d / "run_summary.json"
-            
-            # 1. Base Metadata from Manifest
-            manifest = read_json_safe(manifest_path, {})
-            state = read_json_safe(state_path, {})
-            summary = read_json_safe(summary_path, {})
-            
-            # 2. Strict Status Precedence
-            # failed (summary) > completed (summary) > running (state) > interrupted (state) > queued (state) > unknown
-            status = "unknown"
-            if summary_path.exists():
-                s_status = summary.get("status")
-                if s_status == "failed":
-                    status = "failed"
-                else: # covers 'completed' and 'success'
-                    status = "completed"
-            elif state.get("status") == "running":
-                status = "running"
-            elif state.get("status") == "interrupted":
-                status = "interrupted"
-            elif state.get("status") == "queued":
-                status = "queued"
-            
-            # 3. Read Classification (Cached)
-            classification_data = read_json_safe(d / "classification.json", {})
-            classification = classification_data.get("classification", {})
-            
-            # 4. Normalized Row
-            run = {
-                "run_id": manifest.get("run_id", d.name),
-                "exp_id": manifest.get("exp_id"),
-                "status": status,
-                "classification_label": classification.get("label"),
-                "classification_confidence": classification.get("confidence"),
-                "created_at": manifest.get("created_at") or manifest.get("submitted_at"),
-                "started_at": state.get("started_at") or manifest.get("started_at"),
-                "completed_at": summary.get("completed_at") or state.get("completed_at"),
-                "workload_type": manifest.get("workload_type", manifest.get("task", "unknown")),
-                "requested_by": manifest.get("requested_by", "unknown"),
-                "failure_reason": summary.get("error") or state.get("failure_reason") or state.get("error"),
-                "has_summary": summary_path.exists(),
-                "has_results": (d / "results.json").exists(),
-                "has_stdout": (d / "stdout.log").exists(),
-                "has_stderr": (d / "stderr.log").exists(),
-                "duration_s": summary.get("duration_s")
-            }
-            runs.append(run)
+                # 1. Base Metadata from Manifest
+                manifest = read_json_safe(manifest_path, {})
+                state = read_json_safe(state_path, {})
+                summary = read_json_safe(summary_path, {})
+                
+                # 2. Strict Status Precedence
+                # failed (summary) > completed (summary) > running (state) > interrupted (state) > queued (state) > unknown
+                status = "unknown"
+                if summary_path.exists():
+                    s_status = summary.get("status")
+                    if s_status == "failed":
+                        status = "failed"
+                    else: # covers 'completed' and 'success'
+                        status = "completed"
+                elif state.get("status") == "running":
+                    status = "running"
+                elif state.get("status") == "interrupted":
+                    status = "interrupted"
+                elif state.get("status") == "queued":
+                    status = "queued"
+                
+                # 3. Read Classification (Cached)
+                classification_data = read_json_safe(d / "classification.json", {})
+                classification = classification_data.get("classification", {})
+                
+                # 4. Precise Duration Logic
+                duration_s = summary.get("duration_s")
+                if duration_s is None and status in {"completed", "failed", "interrupted"}:
+                    start = state.get("started_at") or manifest.get("started_at")
+                    end = summary.get("completed_at") or state.get("completed_at")
+                    if start and end:
+                        try:
+                            d_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                            d_end = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                            duration_s = int((d_end - d_start).total_seconds())
+                        except Exception:
+                            duration_s = None
+
+                # 5. Normalized Row
+                run = {
+                    "run_id": manifest.get("run_id", d.name),
+                    "exp_id": manifest.get("exp_id"),
+                    "status": status,
+                    "is_terminal": summary_path.exists() or status == "interrupted",
+                    "classification_label": classification.get("label"),
+                    "classification_confidence": classification.get("confidence"),
+                    "created_at": manifest.get("created_at") or manifest.get("submitted_at"),
+                    "started_at": state.get("started_at") or manifest.get("started_at"),
+                    "completed_at": summary.get("completed_at") or state.get("completed_at"),
+                    "workload_type": manifest.get("workload_type", manifest.get("task", "unknown")),
+                    "requested_by": manifest.get("requested_by", "unknown"),
+                    "failure_reason": summary.get("error") or state.get("failure_reason") or state.get("error"),
+                    "has_summary": summary_path.exists(),
+                    "has_results": (d / "results.json").exists(),
+                    "has_stdout": (d / "stdout.log").exists(),
+                    "has_stderr": (d / "stderr.log").exists(),
+                    "duration_s": duration_s
+                }
+                runs.append(run)
+            except Exception as e:
+                # Individual run corruption should not crash the registry
+                print(f"[!] Warning: Failed to scan run directory {d.name}: {e}")
+                continue
             
         # 4. Sort newest first by manifest created_at
         def sort_key(r):
