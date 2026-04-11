@@ -1,38 +1,34 @@
-# Phase 2D — Run Intelligence Layer
+# Parallel Split Execution — VPS Rollout & Failure Intelligence
 
-We have successfully **sealed the Run Intelligence Layer**. This phase transitions TM4Server from a raw artifact writer into a structured truth engine that provides investor-grade evidence and automated reports.
+We have successfully completed the **Parallel Split Execution**. TM4Server is now deployed in a production-hardened environment and possesses a deterministic intelligence layer for failure interpretation.
 
 ## 🏁 Key Achievements
 
-### 1. Canonical Run Record Schema
-- **Structure**: Formalized the `RunRecord` as a unified object combining **Intent** (Manifest), **Execution** (Status), **Outcome** (Summary), and **Governance** (Validation).
-- **Hardened Indexing**: [**record.py**](file:///c:/Users/Robert/TM4Server/tm4server/execution/record.py) now provides a deterministic builder for both full records and scan-friendly index views.
+### 1. Production-Hardened VPS Rollout
+- **Dedicated Service User**: Implemented the `tm4` system user for process isolation and file ownership integrity.
+- **Hardened Bootstrap**: [**bootstrap_server.sh**](file:///c:/Users/Robert/TM4Server/scripts/bootstrap_server.sh) now automates user creation and enforces ownership across `/var/lib/tm4` and code repositories.
+- **Systemd Orchestration**: [**tm4-runner.service**](file:///c:/Users/Robert/TM4Server/systemd/tm4-runner.service) is now configured for high-availability (`Restart=always`) and correctly propagates all Spec v1 environment variables.
 
-### 2. Strict Forensic Governance
-- **Identity Consensus**: Added [**validate_identity_consensus**](file:///c:/Users/Robert/TM4Server/tm4server/execution/record.py) to catch "Split-Brain" runs where artifacts have mismatched IDs.
-- **Strict vs Compat Modes**: The API now defaults to `strict=True`, excluding any non-conformant runs. Legacy runs are isolated behind an explicit `mode=compat` flag.
-- **Fail-Closed At Ingestion**: Hardened `artifacts.py` whitelists for `status.json` and `run_summary.json` to prevent silent drift.
+### 2. Failure Intelligence Engine (Phase 2D.2)
+- **Deterministic Taxonomy**: Established the v1 failure taxonomy: `infra_error`, `execution_error`, `contract_error`, `interrupted`, and `model_error`.
+- **Signal Processor**: [**intelligence.py**](file:///c:/Users/Robert/TM4Server/tm4server/execution/intelligence.py) now derives classifications from exit codes (e.g. 137 -> OOM), log regex patterns (e.g. Tracebacks), and contract integrity (artifact health).
+- **Audit-Grade Metadata**: Every classification includes **Source Tracking** (e.g., `derived_v1_stderr`) and a **Retry Recommendation** signal.
 
-### 3. Automated Experiment Ledger
-- **Deterministic Reports**: [**ledger.py**](file:///c:/Users/Robert/TM4Server/tm4server/execution/ledger.py) now automatically generates `docs/experiments/RUN-*.md` upon run completion.
-- **Strict-Only Generation**: The ledger strictly refuses to document any run that is not Spec v1 conformant.
-- **Provenance Footer**: Every report includes a machine-traceable footer with generator metadata.
+### 3. Record & Ledger Integration
+- **Intelligence Propagation**: The `RunRecord` now carries the interpreted intelligence block by default.
+- **Human-Verifiable Evidence**: The automated Markdown reports ([**RUN-*.md**](file:///c:/Users/Robert/TM4Server/docs/experiments/)) now feature an "Intelligence" section that translates raw failure signals into plain English.
 
-### 4. Forensic Log Model
-- **Dual Constraints**: Log tails are now constrained by **50 lines** AND **16 KB**, preventing oversized responses while ensuring failure visibility.
-- **Honest Metadata**: Every log block explicitly signals truncation and character replacement to maintain audit integrity.
-
-## 🧪 Verification Proof
-- **Identity Mismatch (Strict Mode)**: `[OK] Strict Mode Record: REJECTED`.
-- **Identity Mismatch (Compat Mode)**: `[OK] Validation Errors: ['run_id mismatch: status (RUN-B) vs manifest (RUN-A)']`.
-- **Log Tailing**: `[OK] Result (80 lines/16KB): Lines=78, Bytes=16384, Truncated=bytes`.
-- **Ledger Path**: `[OK] Ledger written to: docs/experiments/RUN-VALID-LEDGER.md`.
+## 🧪 Verification Proof (Golden Failure Fixtures)
+- **OOM (exit 137)**: `[OK] Class=infra_error, Source=derived_v1_exitcode, Retry=True`.
+- **Traceback (Log pattern)**: `[OK] Class=execution_error, Source=derived_v1_stderr, Retry=False`.
+- **Contract Mismatch (Missing summary)**: `[OK] Class=contract_error, Source=derived_v1_contract`.
+- **Interruption (PID death)**: `[OK] Class=interrupted, Source=derived_v1_status`.
 
 ## 🧾 Closure Status
-- [x] Canonical `RunRecord` defined and implemented.
-- [x] `StateManager` indexing delegated to `RunRecordBuilder`.
-- [x] API hardened with `mode=strict` default.
-- [x] `ExperimentLedger` automated in production execution path.
-- [x] Dual-constraint log tailing verified.
+- [x] Dedicated `tm4` user implemented in bootstrap.
+- [x] `tm4-runner.service` hardened for production.
+- [x] `intelligence.py` engine implemented and integrated.
+- [x] Fail-closed contract violation detection enabled.
+- [x] Golden Failure Fixtures verified.
 
-**Phase 2D is now SEALED and audit-ready.**
+**TM4Server is now a生產-ready, self-interpreting organism. VPS Rollout and Failure Intelligence are SEALED.**

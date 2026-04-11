@@ -21,6 +21,15 @@ echo "Runtime base   : $TM4_BASE"
 echo "Log dir        : $TM4_LOGS"
 echo "============================================="
 
+# 0. Create dedicated service user
+echo "[0/5] Ensuring 'tm4' service user exists..."
+if ! id "tm4" &>/dev/null; then
+  sudo useradd -r -s /usr/sbin/nologin tm4
+  echo "    User 'tm4' created."
+else
+  echo "    User 'tm4' already exists — skipping."
+fi
+
 # 1. Create runtime directory structure
 echo "[1/5] Creating runtime directories..."
 sudo mkdir -p "$TM4_BASE/state"
@@ -33,8 +42,8 @@ sudo mkdir -p "$TM4_BASE/queue/running"
 sudo mkdir -p "$TM4_BASE/queue/completed"
 sudo mkdir -p "$TM4_BASE/queue/failed"
 sudo mkdir -p "$TM4_LOGS"
-sudo chown -R "$USER:$USER" "$TM4_BASE" "$TM4_LOGS"
-echo "    Runtime directories created."
+sudo chown -R tm4:tm4 "$TM4_BASE" "$TM4_LOGS"
+echo "    Runtime directories created and owned by 'tm4'."
 
 # 2. Initialize status.json if missing
 STATUS_FILE="$TM4_BASE/state/status.json"
@@ -114,3 +123,7 @@ else
   echo "============================================="
   exit 1
 fi
+
+# Final Ownership Enforcement
+echo "[deploy] Enforcing 'tm4' ownership on repositories..."
+sudo chown -R tm4:tm4 "$TM4SERVER_REPO" "$TM4_CORE_REPO"

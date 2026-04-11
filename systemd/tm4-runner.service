@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=tm4
+Group=tm4
 WorkingDirectory=/opt/tm4server
 # Environment variables for the worker
 Environment=TM4_RUNTIME_ROOT=/var/lib/tm4
@@ -13,7 +14,7 @@ Environment=TM4CORE_REPO_ROOT=/opt/tm4-core
 # Use the virtualenv python
 ExecStart=/opt/tm4server/venv/bin/python -m tm4server.execution.worker
 Restart=always
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

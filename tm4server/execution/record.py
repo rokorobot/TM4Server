@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from collections import deque
 
+from .intelligence import SignalProcessor
+
 def tail_log(path: Path, max_lines: int = 50, max_bytes: int = 16384) -> dict[str, Any]:
     """
     Dual-Constraint Log Tailing Model.
@@ -185,24 +187,31 @@ class RunRecordBuilder:
             "stderr": tail_log(run_dir / "stderr.log"),
         }
 
-        # 9. Intelligence (Stub for 2D.2)
-        intelligence = {
-            "failure_class": None,
-            "failure_reason": (summary or {}).get("error") or (status_data or {}).get("failure_reason"),
-            "interrupted": outcome_status == "interrupted",
-            "retry_recommended": False,
-            "confidence": 0.0,
-            "source": "none"
+        # 9. Intelligence (Phase 2D.2)
+        # We build a partial record first to satisfy the classifier requirements
+        partial_record = {
+            "identity": {"run_id": manifest.get("run_id", run_id), "exp_id": manifest.get("exp_id")},
+            "intent": intent,
+            "execution": execution,
+            "outcome": outcome,
+            "logs": logs,
+            "governance": {
+                "conformance": conformance,
+                "is_legacy": is_legacy,
+                "validation_errors": val_errors,
+                "fallbacks_used": fallbacks
+            },
+            "artifacts_meta": {
+                "summary_present": (run_dir / "run_summary.json").exists()
+            }
         }
+        intelligence = SignalProcessor.classify(partial_record)
 
         # 10. Assemble Run Record
         return {
             "schema_version": "v1",
             "mode": "strict" if strict else "compat",
-            "identity": {
-                "run_id": manifest.get("run_id", run_id),
-                "exp_id": manifest.get("exp_id")
-            },
+            "identity": partial_record["identity"],
             "intent": intent,
             "execution": execution,
             "outcome": outcome,
@@ -216,10 +225,5 @@ class RunRecordBuilder:
                 "stderr_present": (run_dir / "stderr.log").exists(),
                 "aux_runtime_status_present": (run_dir / "tm4_runtime_status.json").exists(),
             },
-            "governance": {
-                "conformance": conformance,
-                "is_legacy": is_legacy,
-                "validation_errors": val_errors,
-                "fallbacks_used": fallbacks
-            }
+            "governance": partial_record["governance"]
         }
