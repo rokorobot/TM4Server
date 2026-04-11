@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from .artifacts import write_manifest, write_status, write_summary
+from .artifacts import write_manifest, write_status, write_summary, utc_now_z
 from .launcher import build_tm4_command
-from ..state import StateManager, utc_now_iso
+from ..state import StateManager
 
 # Default paths for worker context
 TM4_RUNTIME_ROOT = Path(os.getenv("TM4_RUNTIME_ROOT", "/var/lib/tm4"))
@@ -58,24 +58,20 @@ def run_worker():
             runs_root = TM4_RUNTIME_ROOT / "runs"
             run_dir = runs_root / run_id
             
-            started_at = utc_now_iso()
+            started_at = utc_now_z()
             completed_at = None
             
             try:
                 # No silent reuse: exist_ok=False
                 run_dir.mkdir(parents=True, exist_ok=False)
                 
-                # 4. Write immutable manifest (contract point)
+                # 4. Write immutable manifest (Spec v1)
                 manifest = {
                     "run_id": run_id,
                     "exp_id": exp_id,
                     "workload_type": "tm4_autonomy_loop",
-                    "created_at": started_at,
-                    "started_at": started_at,
-                    "status": "running",
-                    "runtime_root": str(run_dir),
                     "requested_by": "operator",
-                    "trigger_source": "control_api"
+                    "created_at": started_at,
                 }
                 write_manifest(run_dir, manifest)
                 
@@ -108,24 +104,22 @@ def run_worker():
                         env=env
                     )
                     
-                    # 8. Local status mid-run (canonical status.json)
+                    # 8. Local status mid-run (Spec v1 status.json)
                     write_status(run_dir, {
                         "run_id": run_id,
                         "status": "running",
-                        "phase": "execution",
                         "started_at": started_at,
-                        "pid": process.pid
+                        "worker_pid": process.pid,
                     })
                     
                     # 9. Wait for completion
                     exit_code = process.wait()
-                    completed_at = utc_now_iso()
+                    completed_at = utc_now_z()
                 finally:
                     stdout_f.close()
                     stderr_f.close()
                 
-                # 10. Final terminal summary (SUCCESS or FAILURE evidence)
-                # Failures still produce artifacts.
+                # 10. Final terminal summary (Model A authority for production)
                 write_summary(run_dir, {
                     "run_id": run_id,
                     "exp_id": exp_id,
@@ -134,7 +128,6 @@ def run_worker():
                     "completed_at": completed_at,
                     "exit_code": exit_code,
                     "artifact_root": str(run_dir),
-                    "error": f"Process exited with code {exit_code}" if exit_code != 0 else None
                 })
                 
                 # 11. Global truth anchor: Update status to idle
@@ -156,7 +149,7 @@ def run_worker():
             except Exception as e:
                 # Emergency terminal summary on failure (Fail-Closed Evidence)
                 print(f"[!] Launch failure: {e}")
-                completed_at = utc_now_iso()
+                completed_at = utc_now_z()
                 
                 if run_dir.exists():
                     write_summary(run_dir, {

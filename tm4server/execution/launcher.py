@@ -23,7 +23,7 @@ def build_tm4_command(tm4core_repo: Path, run_dir: Path) -> tuple[list[str], dic
     # Environment contract
     env = os.environ.copy()
     env["TM4_RUN_DIR"] = str(run_dir)
-    env["TM4_STATUS_FILE"] = str(run_dir / "status.json")
+    env["TM4_STATUS_FILE"] = str(run_dir / "tm4_runtime_status.json")
     
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = (

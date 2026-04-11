@@ -114,6 +114,9 @@ def validate_run(run_dir_str: str):
     if man and man.get("run_id") != run_dir.name:
         print(f"[!] Warning: Directory name '{run_dir.name}' does not match run_id '{man.get('run_id')}'")
 
+    if (run_dir / "tm4_runtime_status.json").exists():
+        print(f"[*] Info: Found auxiliary TM4 runtime status (tm4_runtime_status.json)")
+
     if success:
         print(f"--- [OK] {run_dir.name} is spec-v1 CONFORMANT ---")
     else:

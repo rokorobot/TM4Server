@@ -7,6 +7,20 @@ run_id = "RUN-INVALID-V1"
 mock_dir = Path("mock_runs") / run_id
 os.makedirs(mock_dir, exist_ok=True)
 
+print("\n--- Testing Strict Manifest Validation (forbidden fields) ---")
+try:
+    artifacts.write_manifest(mock_dir, {
+        "run_id": run_id,
+        "exp_id": "EXP-FORBIDDEN",
+        "workload_type": "contract-validation",
+        "requested_by": "test-suite",
+        "created_at": artifacts.utc_now_z(),
+        "started_at": artifacts.utc_now_z() # FORBIDDEN
+    })
+    print("[X] FAILED: Allowed manifest with forbidden fields")
+except ValueError as e:
+    print(f"[OK] Caught expected error: {e}")
+
 print("--- Testing Immutability Violation ---")
 artifacts.write_manifest(mock_dir, {
     "run_id": run_id,

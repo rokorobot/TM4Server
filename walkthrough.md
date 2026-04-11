@@ -1,38 +1,37 @@
-# Phase 2C.1 — Artifact Contract Reconciliation
+# Phase 2C.2 — Worker Path Governance Cutover
 
-We have successfully **sealed** the TM4Server artifact governance layer. This reconciliation phase resolved final integration drift, unified the identity schema, and hardened the forensic validator to full Spec v1 parity.
+We have successfully **sealed the production execution path**. This phase resolved the "stale metadata" issue on the VPS by cutting over the active `worker.py` and `launcher.py` to the **Run Artifact Specification v1**.
 
-## 🏁 Final Sealing Achievements
+## 🏁 Final Production Sealing
 
-### 1. Model A Ownership (Unique Writer Authority)
-- **Runtime Supreme**: Formally designated `runtime.py` as the unique authority for extracting and writing `run_summary.json`. 
-- **Runner Relinquishment**: [**runner.py**](file:///c:/Users/Robert/TM4Server/tm4server/runner.py) has been stripped of summary-writing responsibility. It now focuses exclusively on lifecycle state progression (`status.json`).
-- **Race Prevention**: This architecture eliminates collisions and immutability violations in terminal artifacts.
+### 1. status.json Collision Resolved
+- **Problem**: `launcher.py` was instructing TM4 core to write its runtime status directly to `status.json`, overwriting our governed per-run artifact.
+- **Solution**: Relocated TM4 core runtime status to [**tm4_runtime_status.json**](file:///c:/Users/Robert/TM4Server/tm4server/execution/launcher.py).
+- **Result**: `status.json` is now exclusively owned by the forensic governor and contains correct `instance_id` and `worker_pid` metadata.
 
-### 2. Schema Unification (exp_id)
-- **Identity Alignment**: Excised and normalized legacy `experiment_id` references across the entire codebase. Every artifact and event now uses the canonical `exp_id` and `run_id`.
-- **Legacy Extraction**: [**run_summary.py**](file:///c:/Users/Robert/TM4Server/tm4server/run_summary.py) now reads `run_manifest.json` by default, but retains intelligent fallbacks to ensure old-world runs can still be summarized during migration.
+### 2. Strict Manifest Enforcement
+- **Hardened Governor**: [**artifacts.py**](file:///c:/Users/Robert/TM4Server/tm4server/execution/artifacts.py) now strictly validates top-level manifest keys against the Spec v1 allowlist. 
+- **Legacy Rejection**: Any attempt to write a manifest with forbidden fields (e.g., `started_at`, `status`) now raises an immediate `ValueError`. 
+- **Worker Alignment**: [**worker.py**](file:///c:/Users/Robert/TM4Server/tm4server/execution/worker.py) was refactored to emit only canonical manifest fields, ensuring no legacy drift occurs during run initialization.
 
-### 3. Governor & Validator Hardening
-- **Timestamp Forensic**: The governor now strictly validates ISO-8601 Z format for all incoming timestamps.
-- **started_at Requirement**: [**artifacts.py**](file:///c:/Users/Robert/TM4Server/tm4server/execution/artifacts.py) now requires `started_at` on the first write. If the status is `running`, the governor auto-injects it; for all other states, it must be provided. It is preserved on all subsequent writes.
-- **Spec-v1 Parity**: The [**verify_artifact_contract.py**](file:///c:/Users/Robert/TM4Server/scripts/verify_artifact_contract.py) script now enforces:
-    - Mandatory **started_at** in `status.json`.
-    - Strict **Identity Agreement** (Run ID, Exp ID, Instance ID) across all artifacts in a directory.
+### 3. Production Path Refactor
+- **Unified Timestamps**: Switched the production worker to use `artifacts.utc_now_z()`, eliminating the legacy `utc_now_iso` dependency.
+- **Field Normalization**: Renamed `pid` to `worker_pid` in the worker's status writes to achieve full validator parity.
+- **Model A Confirmed**: Formally adopted the active worker as the terminal summary authority for the current production flow.
 
 ## 🧪 Forensic Proof
 
-### Identity Drift Case (Failing)
-- **Test**: Created a run where `status.json` had a different `exp_id` than the manifest.
-- **Result**: `[X] Consistency drift detected for 'exp_id'! status has 'EXP-DRIFTED' vs manifest/first 'EXP-CONSISTENT'`
-- **Verdict**: Validator successfully caught the forensic violation.
+### Strict Manifest Test (Passing)
+- **Test**: Attempted to write a manifest with legacy `started_at` field.
+- **Result**: `[OK] Caught expected error: run_manifest contains forbidden extra fields: {'started_at'}. Spec v1 is strict.`
 
-### Validated spec-v1 Case (Passing)
-- **Test**: Mock execution cycle using the hardened governor.
+### Fresh Production Run (Conformant)
+- **Test**: Executed a mock run simulating the active worker path.
 - **Result**: `--- [OK] RUN-VALID-V1 is spec-v1 CONFORMANT ---`
+- **Auxiliary Traces**: `[*] Info: Found auxiliary TM4 runtime status (tm4_runtime_status.json)`
 
 ## 🧾 Closure Status
-- [x] Integration bugs in `runner.py` resolved.
-- [x] Double-write risk eliminated.
-- [x] Forensic metadata (`instance_id`) injected into summaries.
-- [x] Spec v1 contract fully enforced by governor & validator.
+- [x] status.json collision resolved in `launcher.py`.
+- [x] Legacy manifest field leakage blocked in `artifacts.py`.
+- [x] Production worker aligned with Spec v1 fields and timestamps.
+- [x] Validator updated to acknowledge auxiliary runtime traces.

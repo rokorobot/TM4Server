@@ -63,7 +63,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 def write_manifest(run_dir: Path, data: dict[str, Any]) -> None:
     """
     Writes immutable run_manifest.json (Spec v1).
-    Validation: required fields, immutability, timestamp format.
+    Validation: required fields, strict key whitelist, immutability, timestamps.
     """
     path = run_dir / "run_manifest.json"
     if path.exists():
@@ -71,7 +71,13 @@ def write_manifest(run_dir: Path, data: dict[str, Any]) -> None:
 
     payload = data.copy()
     
-    # Required Fields Check
+    # 1. Strict Key Validation (Spec v1)
+    allowed = {"run_id", "exp_id", "workload_type", "requested_by", "created_at", "schema_version"}
+    extras = set(payload.keys()) - allowed
+    if extras:
+        raise ValueError(f"run_manifest contains forbidden extra fields: {extras}. Spec v1 is strict.")
+
+    # 2. Required Fields Check
     required = ["run_id", "exp_id", "workload_type", "requested_by", "created_at"]
     missing = [k for k in required if k not in payload]
     if missing:
