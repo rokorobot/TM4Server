@@ -206,11 +206,19 @@ async def launch_run():
     )
 
 @router.get("/runs")
-async def get_runs(limit: int = Query(50, ge=1, le=500)):
-    """Returns a list of normalized run metadata from the runs/ directory."""
+async def get_runs(
+    limit: int = Query(50, ge=1, le=500),
+    mode: str = Query("strict", regex="^(strict|compat)$")
+):
+    """
+    Returns a list of normalized run metadata.
+    mode=strict (default): Only Spec v1 conformant runs.
+    mode=compat: Includes legacy runs with conformance flags.
+    """
     try:
-        items = state.list_runs(RUNS_DIR, limit=limit)
-        return {"ok": True, "items": items, "count": len(items)}
+        strict = (mode == "strict")
+        items = state.list_runs(RUNS_DIR, limit=limit, strict=strict)
+        return {"ok": True, "mode": mode, "items": items, "count": len(items)}
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -224,11 +232,18 @@ async def get_runs(limit: int = Query(50, ge=1, le=500)):
         )
 
 @router.get("/runs/{run_id}")
-async def get_run_detail(run_id: str):
-    """Returns raw JSON payloads (manifest, status, summary) for a specific run."""
+async def get_run_detail(
+    run_id: str,
+    mode: str = Query("strict", regex="^(strict|compat)$")
+):
+    """
+    Returns the canonical Run Record (intent, execution, outcome, governance).
+    mode=strict (default): Fails if run is non-conformant.
+    """
     try:
-        detail = state.get_run_detail(RUNS_DIR, run_id)
-        return {"ok": True, "detail": detail}
+        strict = (mode == "strict")
+        record = state.get_run_detail(RUNS_DIR, run_id, strict=strict)
+        return {"ok": True, "mode": mode, "run": record}
     except FileNotFoundError as e:
         raise HTTPException(
             status_code=404,

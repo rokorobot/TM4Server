@@ -7,12 +7,28 @@ from datetime import datetime
 
 from .artifacts import write_manifest, write_status, write_summary, utc_now_z
 from .launcher import build_tm4_command
+from .record import RunRecordBuilder
+from .ledger import ExperimentLedger
 from ..state import StateManager
 
 # Default paths for worker context
 TM4_RUNTIME_ROOT = Path(os.getenv("TM4_RUNTIME_ROOT", "/var/lib/tm4"))
 TM4SERVER_REPO_ROOT = Path(os.getenv("TM4SERVER_REPO_ROOT", "/opt/tm4server"))
 TM4CORE_REPO_ROOT = Path(os.getenv("TM4CORE_REPO_ROOT", "/opt/tm4-core"))
+EXPERiments_DOC_DIR = TM4SERVER_REPO_ROOT / "docs" / "experiments"
+
+def _generate_run_ledger(run_dir: Path, run_id: str):
+    """Safely generates a human-verifyable report for a completed run."""
+    try:
+        builder = RunRecordBuilder(run_dir.parent)
+        # We use strict=True because the Ledger requires Spec v1 compliance.
+        record = builder.build_record(run_id, strict=True)
+        if record:
+            ledger = ExperimentLedger(EXPERiments_DOC_DIR)
+            ledger.write_ledger(record)
+            print(f"[*] Ledger generated: {run_id}.md")
+    except Exception as e:
+        print(f"[!] Warning: Failed to generate ledger for {run_id}: {e}")
 
 def generate_run_id() -> str:
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -120,15 +136,11 @@ def run_worker():
                     stderr_f.close()
                 
                 # 10. Final terminal summary (Model A authority for production)
-                write_summary(run_dir, {
-                    "run_id": run_id,
-                    "exp_id": exp_id,
-                    "status": "success" if exit_code == 0 else "failed",
-                    "started_at": started_at,
-                    "completed_at": completed_at,
-                    "exit_code": exit_code,
                     "artifact_root": str(run_dir),
                 })
+                
+                # 10.1 Generate Ledger (Audit Projection)
+                _generate_run_ledger(run_dir, run_id)
                 
                 # 11. Global truth anchor: Update status to idle
                 state.set_runtime_execution_status(
@@ -162,6 +174,9 @@ def run_worker():
                         "artifact_root": str(run_dir),
                         "error": str(e)
                     })
+                    
+                    # Emergency Ledger (if possible)
+                    _generate_run_ledger(run_dir, run_id)
                 
                 # Global fail state reflection
                 state.set_runtime_execution_status(

@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Iterator, Union
 from contextlib import contextmanager
 
+from .execution.record import RunRecordBuilder
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -422,91 +424,59 @@ class StateManager:
         
         return interrupted_count
 
-    def list_runs(self, runs_dir: Path, limit: int = 50) -> list[dict[str, Any]]:
-        """Scans runs_dir and returns a list of normalized run metadata objects."""
+    def list_runs(self, runs_dir: Path, limit: int = 50, strict: bool = True) -> list[dict[str, Any]]:
+        """
+        Scans runs_dir and returns a list of canonical Run Records (Index View).
+        Delegates schema construction to RunRecordBuilder.
+        """
         if not runs_dir.exists():
             return []
             
+        builder = RunRecordBuilder(runs_dir)
         runs = []
-        for d in runs_dir.iterdir():
-            try:
-                if not d.is_dir() or not d.name.startswith("RUN-"):
-                    continue
-                    
-                manifest_path = d / "run_manifest.json"
-                state_path = d / "status.json"
-                summary_path = d / "run_summary.json"
-                
-                # 1. Base Metadata from Manifest
-                manifest = read_json_safe(manifest_path, {})
-                state = read_json_safe(state_path, {})
-                summary = read_json_safe(summary_path, {})
-                
-                # 2. Strict Status Precedence
-                # failed (summary) > completed (summary) > running (state) > interrupted (state) > queued (state) > unknown
-                status = "unknown"
-                if summary_path.exists():
-                    s_status = summary.get("status")
-                    if s_status == "failed":
-                        status = "failed"
-                    else: # covers 'completed' and 'success'
-                        status = "completed"
-                elif state.get("status") == "running":
-                    status = "running"
-                elif state.get("status") == "interrupted":
-                    status = "interrupted"
-                elif state.get("status") == "queued":
-                    status = "queued"
-                
-                # 3. Read Classification (Cached)
-                classification_data = read_json_safe(d / "classification.json", {})
-                classification = classification_data.get("classification", {})
-                
-                # 4. Precise Duration Logic
-                duration_s = summary.get("duration_s")
-                if duration_s is None and status in {"completed", "failed", "interrupted"}:
-                    start = state.get("started_at") or manifest.get("started_at")
-                    end = summary.get("completed_at") or state.get("completed_at")
-                    if start and end:
-                        try:
-                            d_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                            d_end = datetime.fromisoformat(end.replace("Z", "+00:00"))
-                            duration_s = int((d_end - d_start).total_seconds())
-                        except Exception:
-                            duration_s = None
+        
+        # Sort directories by creation time (OS-level) for initial scan order
+        dirs = sorted(
+            [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith("RUN-")],
+            key=lambda x: x.stat().st_ctime,
+            reverse=True
+        )
 
-                # 5. Normalized Row
-                run = {
-                    "run_id": manifest.get("run_id", d.name),
-                    "exp_id": manifest.get("exp_id"),
-                    "status": status,
-                    "is_terminal": summary_path.exists() or status == "interrupted",
-                    "classification_label": classification.get("label"),
-                    "classification_confidence": classification.get("confidence"),
-                    "created_at": manifest.get("created_at") or manifest.get("submitted_at"),
-                    "started_at": state.get("started_at") or manifest.get("started_at"),
-                    "completed_at": summary.get("completed_at") or state.get("completed_at"),
-                    "workload_type": manifest.get("workload_type", manifest.get("task", "unknown")),
-                    "requested_by": manifest.get("requested_by", "unknown"),
-                    "failure_reason": summary.get("error") or state.get("failure_reason") or state.get("error"),
-                    "has_summary": summary_path.exists(),
-                    "has_results": (d / "results.json").exists(),
-                    "has_stdout": (d / "stdout.log").exists(),
-                    "has_stderr": (d / "stderr.log").exists(),
-                    "duration_s": duration_s
+        for d in dirs:
+            try:
+                record = builder.build_record(d.name, strict=strict)
+                if not record:
+                    continue
+                
+                # Flatten for index view (Console compat)
+                # We return a simplified version for the index list
+                index_row = {
+                    "run_id": record["identity"]["run_id"],
+                    "exp_id": record["identity"]["exp_id"],
+                    "status": record["execution"]["status"],
+                    "is_terminal": record["execution"]["is_terminal"],
+                    "created_at": record["intent"]["created_at"],
+                    "started_at": record["execution"]["started_at"],
+                    "completed_at": record["execution"]["completed_at"],
+                    "workload_type": record["intent"]["workload_type"],
+                    "requested_by": record["intent"]["requested_by"],
+                    "instance_id": record["execution"]["instance_id"],
+                    "exit_code": record["outcome"]["exit_code"],
+                    "duration_s": record["outcome"]["duration_s"],
+                    "has_summary": record["artifacts_meta"]["summary_present"],
+                    "has_status": record["artifacts_meta"]["status_present"],
+                    "conformance": record["governance"]["conformance"],
+                    "is_legacy": record["governance"]["is_legacy"],
                 }
-                runs.append(run)
+                runs.append(index_row)
+                
+                if len(runs) >= limit:
+                    break
             except Exception as e:
-                # Individual run corruption should not crash the registry
                 print(f"[!] Warning: Failed to scan run directory {d.name}: {e}")
                 continue
             
-        # 4. Sort newest first by manifest created_at
-        def sort_key(r):
-            return r.get("created_at") or "0"
-            
-        runs.sort(key=sort_key, reverse=True)
-        return runs[:limit]
+        return runs
 
     # --- Execution Awareness ---
 
@@ -567,19 +537,18 @@ class StateManager:
 
         atomic_write_json(self.paths.status_json, payload)
 
-    def get_run_detail(self, runs_dir: Path, exp_id: str) -> dict[str, Any]:
-        """Returns the full raw JSON payloads for a specific run."""
-        run_dir = runs_dir / exp_id
-        if not run_dir.exists():
-            raise FileNotFoundError(f"Run directory not found: {exp_id}")
-            
-        return {
-            "run_id": exp_id,
-            "manifest": read_json_safe(run_dir / "run_manifest.json", {}),
-            "status": read_json_safe(run_dir / "status.json", {}),
-            "summary": read_json_safe(run_dir / "run_summary.json", {}),
-            "classification": read_json_safe(run_dir / "classification.json", {}).get("classification")
-        }
+    def get_run_detail(self, runs_dir: Path, run_id: str, strict: bool = True) -> dict[str, Any]:
+        """
+        Returns the full, structured Run Record for a specific run.
+        Delegates to RunRecordBuilder.
+        """
+        builder = RunRecordBuilder(runs_dir)
+        record = builder.build_record(run_id, strict=strict)
+        
+        if not record:
+             raise FileNotFoundError(f"Run {run_id} not found or non-conformant (strict={strict})")
+             
+        return record
 
     def build_regime_index(self, runs_dir: Path) -> dict[str, Any]:
         """
