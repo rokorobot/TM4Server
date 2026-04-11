@@ -31,6 +31,7 @@ from .experiment_report import ExperimentReportGenerator
 from .git_sync import sync_artifacts_to_git
 from .run_summary import RunSummaryExtractor
 from .utils import append_line, utc_now_iso, write_json
+from .execution import artifacts
 
 
 def _safe_git_hash(repo_path: Path) -> str | None:
@@ -50,7 +51,7 @@ def _safe_git_hash(repo_path: Path) -> str | None:
 
 def _emit_event(event_log: Path, event: str, **kwargs: Any) -> None:
     """Appends a single TM4Server event to the run's event_log.jsonl."""
-    entry = {"ts_utc": utc_now_iso(), "event": event, **kwargs}
+    entry = {"ts_utc": artifacts.utc_now_z(), "event": event, **kwargs}
     append_line(event_log, json.dumps(entry, ensure_ascii=False))
 
 
@@ -63,15 +64,16 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     stderr_log = run_dir / "stderr.log"
     event_log = run_dir / "event_log.jsonl"
     tm4_input_path = run_dir / "tm4_input_manifest.json"
-    exp_id = manifest["experiment_id"]
+    exp_id = manifest.get("exp_id") or manifest.get("experiment_id", "unknown")
+    run_id = manifest.get("run_id") or run_dir.name
 
-    started_at = utc_now_iso()
+    started_at = artifacts.utc_now_z()
     started_ts = time.monotonic()
 
     append_line(stdout_log, f"[{started_at}] Initiating run")
-    append_line(stdout_log, f"[{started_at}] Experiment ID: {exp_id}")
+    append_line(stdout_log, f"[{started_at}] Exp ID: {exp_id}")
 
-    _emit_event(event_log, "job_picked", experiment_id=exp_id)
+    _emit_event(event_log, "job_picked", exp_id=exp_id, run_id=run_id)
 
     try:
         # 1. Preflight Validation
@@ -87,14 +89,12 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
         if errors:
             for err in errors:
-                append_line(stderr_log, f"[{utc_now_iso()}] PREFLIGHT ERROR: {err}")
+                append_line(stderr_log, f"[{artifacts.utc_now_z()}] PREFLIGHT ERROR: {err}")
             _emit_event(event_log, "preflight_failed", errors=errors)
-            write_json(run_dir / "status.json", {
-                "experiment_id": exp_id,
+            artifacts.write_status(run_dir, {
                 "status": "failed",
                 "preflight_status": "failed",
                 "preflight_errors": errors,
-                "ts_utc": utc_now_iso(),
             })
             raise RuntimeError(f"Preflight validation failed for {exp_id}")
 
@@ -106,7 +106,8 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
         # 3. Write config.json (resolved run configuration snapshot)
         config_snapshot = {
-            "experiment_id": exp_id,
+            "exp_id": exp_id,
+            "run_id": run_id,
             "task": manifest.get("task"),
             "model": manifest.get("model"),
             "parameters": manifest.get("parameters", {}),
@@ -116,17 +117,18 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             "tm4_extra_args": TM4_AUTONOMY_EXTRA_ARGS,
             "tm4_git_hash": tm4_git_hash,
             "tm4server_git_hash": tm4server_git_hash,
-            "submitted_at": manifest.get("submitted_at"),
+            "submitted_at": manifest.get("created_at") or manifest.get("submitted_at"),
             "started_at": started_at,
         }
         write_json(run_dir / "config.json", config_snapshot)
 
         # 4. Write tm4_input_manifest.json
         tm4_payload = {
-            "experiment_id": exp_id,
+            "exp_id": exp_id,
+            "run_id": run_id,
             "task": manifest.get("task"),
             "model": manifest.get("model"),
-            "submitted_at": manifest.get("submitted_at"),
+            "submitted_at": manifest.get("created_at") or manifest.get("submitted_at"),
             "tm4server_received_at": started_at,
             "parameters": manifest.get("parameters", {}),
         }
@@ -135,12 +137,12 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         # 5. Environment & Command Setup
         env = os.environ.copy()
         env["TM4SERVER_RUN_DIR"] = str(run_dir)
-        env["TM4SERVER_EXPERIMENT_ID"] = exp_id
+        env["TM4SERVER_EXP_ID"] = exp_id
         env["TM4SERVER_INPUT_MANIFEST"] = str(tm4_input_path)
         env["TM4_OUTPUT_DIR"] = str(run_dir)
 
         cmd = [TM4_PYTHON_BIN, str(TM4_AUTONOMY_SCRIPT)] + TM4_AUTONOMY_EXTRA_ARGS
-        append_line(stdout_log, f"[{utc_now_iso()}] Launching command: {' '.join(cmd)}")
+        append_line(stdout_log, f"[{artifacts.utc_now_z()}] Launching command: {' '.join(cmd)}")
 
         _emit_event(event_log, "subprocess_started", command=cmd[0], script=str(TM4_AUTONOMY_SCRIPT))
 
@@ -156,7 +158,7 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 check=False,
             )
 
-        completed_at = utc_now_iso()
+        completed_at = artifacts.utc_now_z()
         duration_s = round(time.monotonic() - started_ts, 2)
 
         _emit_event(
@@ -179,7 +181,8 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
         # 8. Write results.json
         summary = {
-            "experiment_id": exp_id,
+            "exp_id": exp_id,
+            "run_id": run_id,
             "task": manifest.get("task"),
             "model": manifest.get("model"),
             "status": run_status,
@@ -201,15 +204,11 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             "result_hash": result_hash,
         })
 
-        # 9. Write final status.json
-        write_json(run_dir / "status.json", {
-            "experiment_id": exp_id,
+        # 9. Update live status.json to Success/Failed (Spec v1)
+        artifacts.write_status(run_dir, {
             "status": run_status,
             "preflight_status": "passed",
-            "started_at": started_at,
             "completed_at": completed_at,
-            "duration_s": duration_s,
-            "ts_utc": completed_at,
         })
 
         if proc.returncode == 0:
@@ -222,7 +221,7 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     finally:
         # --- BEST EFFORT POST-RUN ORCHESTRATION ---
         
-        # A. Run Summary Extraction
+        # A. Run Summary Extraction (SOLE Authority - Model A)
         summary_path = None
         try:
             summary_path = RunSummaryExtractor(
@@ -230,10 +229,10 @@ def run_experiment(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 tm4_core_repo=TM4_CORE_PATH,
                 tm4server_repo=Path(__file__).parent.parent,
             ).write()
-            append_line(stdout_log, f"[{utc_now_iso()}] Wrote run summary: {summary_path}")
+            append_line(stdout_log, f"[{artifacts.utc_now_z()}] Wrote run summary: {summary_path}")
             _emit_event(event_log, "run_summary_written", path=str(summary_path))
         except Exception as exc:
-            append_line(stderr_log, f"[{utc_now_iso()}] RUN_SUMMARY ERROR: {exc}")
+            append_line(stderr_log, f"[{artifacts.utc_now_z()}] RUN_SUMMARY ERROR: {exc}")
             _emit_event(event_log, "run_summary_failed", error=str(exc))
 
         # B. Experiment Report Generation

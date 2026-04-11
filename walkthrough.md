@@ -1,34 +1,38 @@
-# Walkthrough - Persistent Daemon Worker Refactor
+# Phase 2C.1 — Artifact Contract Reconciliation
 
-I have refactored the `tm4server/worker.py` loop to behave as a true persistent daemon. The worker process now remains active under all normal operator control conditions, including when explicitly halted or when the job queue is empty.
+We have successfully **sealed** the TM4Server artifact governance layer. This reconciliation phase resolved final integration drift, unified the identity schema, and hardened the forensic validator to full Spec v1 parity.
 
-## Changes Made
+## 🏁 Final Sealing Achievements
 
-### `tm4server` (Core Package)
+### 1. Model A Ownership (Unique Writer Authority)
+- **Runtime Supreme**: Formally designated `runtime.py` as the unique authority for extracting and writing `run_summary.json`. 
+- **Runner Relinquishment**: [**runner.py**](file:///c:/Users/Robert/TM4Server/tm4server/runner.py) has been stripped of summary-writing responsibility. It now focuses exclusively on lifecycle state progression (`status.json`).
+- **Race Prevention**: This architecture eliminates collisions and immutability violations in terminal artifacts.
 
-#### [worker.py](file:///c:/Users/Robert/TM4Server/tm4server/worker.py) [MODIFY]
-- **Orderly Persistence**: Removed the `break` statement from the `halt` mode branch. The worker now enters a dormant `halted` state but keeps the process alive.
-- **State Symmetry**: Standardized the loop across `idle`, `paused`, and `halted` states. Each now follows a consistent pattern:
-    1. Update `status.json` with the current state and heartbeat.
-    2. Sleep for the configured `POLL_INTERVAL_S`.
-    3. Continue the loop.
-- **Daemon Heartbeat**: Ensured that the status heartbeat (`ts_utc`) is updated in every dormant state, providing continuous observability even when the worker is not processing jobs.
-- **Refined Error Handling**: Errors in the loop now write an `error` state to the status file and continue the loop after a sleep, preventing process termination on transient failures.
+### 2. Schema Unification (exp_id)
+- **Identity Alignment**: Excised and normalized legacy `experiment_id` references across the entire codebase. Every artifact and event now uses the canonical `exp_id` and `run_id`.
+- **Legacy Extraction**: [**run_summary.py**](file:///c:/Users/Robert/TM4Server/tm4server/run_summary.py) now reads `run_manifest.json` by default, but retains intelligent fallbacks to ensure old-world runs can still be summarized during migration.
 
-## Verification Results
+### 3. Governor & Validator Hardening
+- **Timestamp Forensic**: The governor now strictly validates ISO-8601 Z format for all incoming timestamps.
+- **started_at Requirement**: [**artifacts.py**](file:///c:/Users/Robert/TM4Server/tm4server/execution/artifacts.py) now requires `started_at` on the first write. If the status is `running`, the governor auto-injects it; for all other states, it must be provided. It is preserved on all subsequent writes.
+- **Spec-v1 Parity**: The [**verify_artifact_contract.py**](file:///c:/Users/Robert/TM4Server/scripts/verify_artifact_contract.py) script now enforces:
+    - Mandatory **started_at** in `status.json`.
+    - Strict **Identity Agreement** (Run ID, Exp ID, Instance ID) across all artifacts in a directory.
 
-### Process Persistence
-I verified the daemon behavior by running the worker in a background process and toggling modes:
-- **`idle`**: Process stays alive and polls when no work is available.
-- **`paused`**: Process stays alive and maintains heartbeat without checking the queue.
-- **`halted`**: Process stays alive and maintains heartbeat in a dormant state.
+## 🧪 Forensic Proof
 
-### Heartbeat Activity
-Verified that `ts_utc` in `status.json` updates strictly according to the `POLL_INTERVAL_S` (3 seconds by default) in all dormant states, as shown in the verification logs:
-- `State: paused, TS: 2026-04-09T21:16:57Z`
-- `State: paused, TS: 2026-04-09T21:17:00Z`
-- `State: halted, TS: 2026-04-09T21:17:03Z`
-- `State: idle,   TS: 2026-04-09T21:17:06Z`
+### Identity Drift Case (Failing)
+- **Test**: Created a run where `status.json` had a different `exp_id` than the manifest.
+- **Result**: `[X] Consistency drift detected for 'exp_id'! status has 'EXP-DRIFTED' vs manifest/first 'EXP-CONSISTENT'`
+- **Verdict**: Validator successfully caught the forensic violation.
 
-## Final State
-The worker is now a robust, persistent daemon that can be remotely managed without requiring service restarts for every mode change. This completes the runtime behavior preparation for the upcoming API layer.
+### Validated spec-v1 Case (Passing)
+- **Test**: Mock execution cycle using the hardened governor.
+- **Result**: `--- [OK] RUN-VALID-V1 is spec-v1 CONFORMANT ---`
+
+## 🧾 Closure Status
+- [x] Integration bugs in `runner.py` resolved.
+- [x] Double-write risk eliminated.
+- [x] Forensic metadata (`instance_id`) injected into summaries.
+- [x] Spec v1 contract fully enforced by governor & validator.

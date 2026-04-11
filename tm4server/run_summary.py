@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 
-SUMMARY_SCHEMA_VERSION = "1.0"
-SUMMARY_GENERATOR_VERSION = "1.0"
+SUMMARY_SCHEMA_VERSION = "v1"
+SUMMARY_GENERATOR_VERSION = "v1.1"
 
 
 EXPECTED_ARTIFACTS = [
     "config.json",
     "event_log.jsonl",
-    "manifest.json",
+    "run_manifest.json",
     "results.json",
     "status.json",
     "stdout.log",
@@ -202,7 +202,7 @@ class RunSummaryExtractor:
 
         self.config_path = self.run_dir / "config.json"
         self.event_log_path = self.run_dir / "event_log.jsonl"
-        self.manifest_path = self.run_dir / "manifest.json"
+        self.manifest_path = self.run_dir / "run_manifest.json"
         self.results_path = self.run_dir / "results.json"
         self.status_path = self.run_dir / "status.json"
         self.stdout_path = self.run_dir / "stdout.log"
@@ -278,15 +278,16 @@ class RunSummaryExtractor:
         return summary
 
     def write(self, filename: str = "run_summary.json") -> Path:
+        # Spec v1 Alignment: Summary extraction MUST use governed write
         summary = self.extract()
-        out_path = self.run_dir / filename
         payload = asdict(summary)
-        validate_summary_dict(payload)
-        out_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=False),
-            encoding="utf-8",
-        )
-        return out_path
+        
+        from .execution import artifacts
+        # Note: artifacts.write_summary handles atomic write, schema_version v1, 
+        # and terminal status check.
+        artifacts.write_summary(self.run_dir, payload)
+        
+        return self.run_dir / filename
 
     def _results_summary(self, results: Dict[str, Any]) -> Dict[str, Any]:
         summary = results.get("summary")
@@ -676,8 +677,6 @@ class RunSummaryExtractor:
                 return "failed"
             return "unknown"
 
-        normalized = str(raw).strip().lower()
-
         mapping = {
             "ok": "success",
             "success": "success",
@@ -685,8 +684,13 @@ class RunSummaryExtractor:
             "done": "success",
             "failed": "failed",
             "error": "failed",
-            "running": "running",
-            "pending": "pending",
-            "unknown": "unknown",
+            "interrupted": "interrupted",
         }
-        return mapping.get(normalized, normalized)
+        
+        normalized = mapping.get(str(raw).strip().lower(), "failed")
+        
+        # Spec v1: Final summary must have terminal status
+        if normalized not in {"success", "failed", "interrupted"}:
+            return "failed"
+            
+        return normalized

@@ -18,6 +18,7 @@ from .config import (
 )
 from .utils import ensure_dir, read_json, write_json, utc_now_iso, append_line
 from .runtime import run_experiment, _emit_event
+from .execution import artifacts
 
 
 def init_dirs() -> None:
@@ -31,22 +32,22 @@ def init_dirs() -> None:
 def process_one(run_dir: Path, state_manager: StateManager | None = None) -> bool:
     """Processes a single run directory by executing the autonomy loop."""
     manifest_path = run_dir / "run_manifest.json"
-    state_file = run_dir / "runtime_state.json"
-    
     if not manifest_path.exists():
         return False
-
-    manifest = read_json(manifest_path)
-    exp_id = manifest.get("exp_id") or manifest.get("experiment_id")
     
-    # 1. Update State to Running
-    runtime_state = {
+    # 0. Load Intent (Spec v1)
+    try:
+        manifest = read_json(manifest_path)
+        exp_id = manifest.get("exp_id") or "unknown"
+    except Exception:
+        return False
+
+    # 1. Update State to Running (Spec v1)
+    status_data = {
         "status": "running",
-        "worker_pid": os.getpid(),
-        "started_at": utc_now_iso(),
-        "updated_at": utc_now_iso()
+        "started_at": artifacts.utc_now_z(),
     }
-    write_json(state_file, runtime_state)
+    artifacts.write_status(run_dir, status_data)
     
     # Update global state for visibility
     if state_manager:
@@ -58,8 +59,8 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
 
     # 2. Setup environment
     write_json(CURRENT_RUN_FILE, {
-        "experiment_id": exp_id,
-        "ts_utc": utc_now_iso(),
+        "exp_id": exp_id,
+        "ts_utc": artifacts.utc_now_z(),
         "run_dir": str(run_dir),
     })
     
@@ -67,26 +68,14 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
     stderr_log = run_dir / "stderr.log"
 
     try:
-        append_line(stdout_log, f"[{utc_now_iso()}] Runner picked job: {exp_id}")
+        append_line(stdout_log, f"[{artifacts.utc_now_z()}] Runner picked job: {exp_id}")
         
         # Executes experiment (writes results.json internally)
-        # Note: runtime.py also manages aggregation and reports in its finally block
+        # Note: runtime.py manages aggregation and the SOLE terminal summary write in its finally block
         results = run_experiment(run_dir, manifest)
 
-        # 3. Terminal Completion (Summary MUST exist before state is terminal)
-        summary_path = run_dir / "run_summary.json"
-        if not summary_path.exists():
-            # Fallback summary if runtime.py didn't write it
-            write_json(summary_path, {
-                "experiment_id": exp_id,
-                "status": "completed",
-                "ts_utc": utc_now_iso(),
-            })
-
-        runtime_state["status"] = "completed"
-        runtime_state["completed_at"] = utc_now_iso()
-        runtime_state["updated_at"] = utc_now_iso()
-        write_json(state_file, runtime_state)
+        # 3. Relinquish summary ownership (Model A)
+        # We NO LONGER write_summary here. runtime.py handles it.
         
         # 4. Sync Global Status
         if state_manager:
@@ -103,28 +92,15 @@ def process_one(run_dir: Path, state_manager: StateManager | None = None) -> boo
         return True
 
     except Exception as e:
-        append_line(stdout_log, f"[{utc_now_iso()}] ERROR: {e}")
-        append_line(stderr_log, f"[{utc_now_iso()}] " + traceback.format_exc())
+        append_line(stdout_log, f"[{artifacts.utc_now_z()}] ERROR: {e}")
+        append_line(stderr_log, f"[{artifacts.utc_now_z()}] " + traceback.format_exc())
 
-        # 3. Terminal Failure
-        # Ensure a final attempt at a summary exists before setting state
-        summary_path = run_dir / "run_summary.json"
-        if not summary_path.exists():
-            try:
-                write_json(summary_path, {
-                    "experiment_id": exp_id,
-                    "status": "failed",
-                    "error": str(e),
-                    "ts_utc": utc_now_iso(),
-                })
-            except Exception:
-                pass
-
-        runtime_state["status"] = "failed"
-        runtime_state["failed_at"] = utc_now_iso()
-        runtime_state["updated_at"] = utc_now_iso()
-        runtime_state["error"] = str(e)
-        write_json(state_file, runtime_state)
+        # 3. Terminal Failure Status (NOT Summary)
+        # We write status to indicate failure to external state manager
+        artifacts.write_status(run_dir, {
+            "status": "failed",
+            "error": str(e),
+        })
         
         if state_manager:
              try:
