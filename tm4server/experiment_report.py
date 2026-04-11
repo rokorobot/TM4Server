@@ -5,64 +5,20 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-REPORT_GENERATOR_VERSION = "1.0"
+REPORT_GENERATOR_VERSION = "1.1"
+FORENSIC_LOG_TAIL_LINES = 80
 
 
-def safe_read_json(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        raise ValueError(f"Summary file does not exist: {path}")
-
-    try:
-        # Use utf-8-sig to handle possible BOM from Windows/PowerShell
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception as exc:
-        raise ValueError(f"Failed to read JSON from {path}: {exc}") from exc
-
-    if not isinstance(payload, dict):
-        raise ValueError(f"Summary file does not contain a JSON object: {path}")
-
-    return payload
-
-
-def fmt(value: Any, default: str = "unknown") -> str:
-    if value is None:
+def safe_get(data: Any, key: str, default: Any = None) -> Any:
+    if not isinstance(data, dict):
         return default
-    if isinstance(value, float):
-        return str(round(value, 3))
-    return str(value)
-
-
-def yes_no(value: Any) -> str:
-    return "yes" if bool(value) else "no"
-
-
-def code_path(value: Any) -> str:
-    return f"`{value}`" if value else "`unknown`"
-
-
-def validate_summary_payload(payload: Dict[str, Any]) -> None:
-    required = [
-        "schema_version",
-        "exp_id",
-        "instance_id",
-        "execution_mode",
-        "status",
-        "artifact_root",
-        "input",
-        "artifacts",
-        "metrics",
-        "validation",
-        "provenance",
-        "warnings",
-    ]
-    missing = [key for key in required if key not in payload]
-    if missing:
-        raise ValueError(f"run_summary missing required keys: {missing}")
+    return data.get(key, default)
 
 
 class ExperimentReportGenerator:
     """
-    Generates a deterministic markdown experiment report from run_summary.json.
+    Generates a deterministic markdown experiment report from run artifacts.
+    Governed by Execution Report Specification v1.
     """
 
     def __init__(
@@ -75,96 +31,159 @@ class ExperimentReportGenerator:
     ) -> None:
         self.summary_path = summary_path.resolve()
         self.docs_root = docs_root.resolve()
+        self.run_dir = self.summary_path.parent
         self.deployment_path = deployment_path
         self.tm4_core_path = tm4_core_path
         self.runtime_root = runtime_root
 
-        self.summary = safe_read_json(self.summary_path)
-        validate_summary_payload(self.summary)
+        # Artifact Health Tracking (Spec v1)
+        self.load_states: Dict[str, str] = {}
+        self.load_details: Dict[str, str] = {}
 
-    @property
-    def exp_id(self) -> str:
-        value = self.summary.get("exp_id")
-        if not value:
-            raise ValueError(f"run_summary missing exp_id: {self.summary_path}")
-        return str(value)
+        # Load Multi-File Artifact Set
+        self.summary = self._load_json(self.summary_path)
+        self.manifest = self._load_json(self.run_dir / "run_manifest.json")
+        self.status = self._load_json(self.run_dir / "status.json")
+
+        # Centralized Run ID Resolution (Triple-fallback as per Spec v1)
+        self.run_id = (
+            safe_get(self.summary, "run_id") 
+            or safe_get(self.manifest, "run_id") 
+            or self.run_dir.name
+        )
+
+    def _load_json(self, path: Path) -> Dict[str, Any]:
+        name = path.name
+        if not path.exists():
+            self.load_states[name] = "missing"
+            return {}
+        
+        try:
+            raw = path.read_text(encoding="utf-8-sig")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                self.load_states[name] = "not-an-object"
+                self.load_details[name] = "JSON root is not an object"
+                return {}
+            
+            self.load_states[name] = "loaded"
+            return payload
+        except Exception as exc:
+            self.load_states[name] = "malformed"
+            self.load_details[name] = str(exc)
+            return {}
+
+    def _read_log(self, name: str, max_lines: int = FORENSIC_LOG_TAIL_LINES) -> str:
+        p = self.run_dir / name
+        if not p.exists():
+            return f"--- No {name} available ---"
+        try:
+            from collections import deque
+            with p.open("r", encoding="utf-8", errors="replace") as f:
+                lines = deque(f, maxlen=max_lines)
+                return "".join(lines)
+        except Exception:
+            return f"--- Error reading {name} ---"
 
     @property
     def output_path(self) -> Path:
-        return self.docs_root / f"{self.exp_id}.md"
+        # Spec v1: Use unified run_id for absolute filename consistency
+        return self.docs_root / f"{self.run_id}.md"
 
     def generate_markdown(self) -> str:
-        s = self.summary
+        sum_data = self.summary
+        man_data = self.manifest
+        sta_data = self.status
 
-        input_block = s.get("input") if isinstance(s.get("input"), dict) else {}
-        artifacts = s.get("artifacts") if isinstance(s.get("artifacts"), dict) else {}
-        metrics = s.get("metrics") if isinstance(s.get("metrics"), dict) else {}
-        validation = s.get("validation") if isinstance(s.get("validation"), dict) else {}
-        provenance = s.get("provenance") if isinstance(s.get("provenance"), dict) else {}
-        warnings = s.get("warnings") if isinstance(s.get("warnings"), list) else []
+        # Metadata Fallback Chains (Spec v1)
+        # status: summary -> status -> manifest -> unknown
+        status = (
+            safe_get(sum_data, "status")
+            or safe_get(sta_data, "status")
+            or safe_get(man_data, "status")
+            or "unknown"
+        )
 
-        artifact_lines = []
-        for name in sorted(artifacts.keys()):
-            artifact_lines.append(f"- `{name}`: {yes_no(artifacts.get(name))}")
-        artifact_section = "\n".join(artifact_lines) if artifact_lines else "- None"
+        # instance_id: status -> summary -> manifest -> unknown
+        instance_id = (
+            safe_get(sta_data, "instance_id")
+            or safe_get(sum_data, "instance_id")
+            or safe_get(man_data, "instance_id")
+            or "unknown"
+        )
 
-        warning_lines = "\n".join(f"- {str(w)}" for w in warnings) if warnings else "- None"
+        # exp_id: summary -> manifest -> status -> unknown
+        exp_id = (
+            safe_get(sum_data, "exp_id")
+            or safe_get(man_data, "exp_id")
+            or safe_get(sta_data, "exp_id")
+            or "unknown"
+        )
 
-        body = f"""# {self.exp_id} — VPS Execution Report
+        run_id = self.run_id
+        duration = safe_get(sum_data, "duration_s")
+        duration_display = f"{duration}s" if duration is not None else "unknown"
+        exit_code = safe_get(sum_data, "exit_code", "unknown")
+        
+        workload = safe_get(man_data, "workload_type", safe_get(man_data, "task", "unknown"))
+        requested_by = safe_get(man_data, "requested_by", "unknown")
+        error = safe_get(sum_data, "error") or safe_get(sum_data, "failure_reason")
 
-## Objective
-Execution record for TM4Server run `{self.exp_id}`.
+        stdout = self._read_log("stdout.log")
+        stderr = self._read_log("stderr.log")
 
-## Execution Context
-- Environment: {fmt(s.get("execution_mode"))}
-- Instance ID: {fmt(s.get("instance_id"))}
-- Status: {fmt(s.get("status"))}
-- TM4 Version: {fmt(s.get("tm4_version"))}
-- TM4Server Version: {fmt(s.get("tm4server_version"))}
+        # Artifact Health Section (Spec v1)
+        health_lines = []
+        for name in ["run_manifest.json", "status.json", "run_summary.json"]:
+            state = self.load_states.get(name, "missing")
+            health_lines.append(f"- **{name}**: `{state}`")
+            if detail := self.load_details.get(name):
+                health_lines.append(f"- **{name} Detail**: `{detail}`")
+        health_section = "\n".join(health_lines)
 
-## Timing
-- Started At: {fmt(s.get("started_at"))}
-- Completed At: {fmt(s.get("completed_at"))}
-- Duration (s): {fmt(s.get("duration_s"))}
+        # Canonical Skeleton (Spec v1)
+        body = f"""# {run_id} — Execution Report
 
-## Artifact Root
-- {code_path(s.get("artifact_root"))}
+## Identity
+- **Run ID**: `{run_id}`
+- **Experiment**: `{exp_id}`
+- **Instance**: `{instance_id}`
 
-## Input References
-- Config: {code_path(input_block.get("config_path"))}
-- Input Manifest: {code_path(input_block.get("input_manifest_path"))}
+## Execution
+- **Status**: `{status}`
+- **Duration**: `{duration_display}`
+- **Exit Code**: `{exit_code}`
 
-## Artifact Presence
-{artifact_section}
+## Intent
+- **Workload**: `{workload}`
+- **Requested By**: `{requested_by}`
 
-## Metrics
-- Generations: {fmt(metrics.get("generations"))}
-- Fitness Max: {fmt(metrics.get("fitness_max"))}
-- Fitness Mean: {fmt(metrics.get("fitness_mean"))}
-- Fitness Min: {fmt(metrics.get("fitness_min"))}
-- TTC: {fmt(metrics.get("ttc"))}
-- Violations: {fmt(metrics.get("violations"))}
-- Checkpoints: {fmt(metrics.get("checkpoints"))}
-- Commits: {fmt(metrics.get("commits"))}
+## Artifact Health
+{health_section}
 
-## Validation
-- Status: {fmt(validation.get("status"))}
-- Reason: {fmt(validation.get("reason"))}
+## Outcome
+**Execution Error**
+```text
+{error or "None"}
+```
 
-## Provenance
-- Summary Generated At: {fmt(provenance.get("summary_generated_at"))}
-- Summary Generator: {fmt(provenance.get("summary_generator"))}
-- Summary Generator Version: {fmt(provenance.get("summary_generator_version"))}
-- Report Source: `{self.summary_path.name}`
-- Report Generator Version: {REPORT_GENERATOR_VERSION}
+## Forensics
+### stdout.log tail
+```text
+{stdout}
+```
 
-## Warnings
-{warning_lines}
+### stderr.log tail
+```text
+{stderr}
+```
 
-## Canonical Paths
-- Deployment Path: `{self.deployment_path}`
-- TM4 Core Path: `{self.tm4_core_path}`
-- Runtime Root: `{self.runtime_root}`
+## Audit
+- **Deployment Path**: `{self.deployment_path}`
+- **Runtime Root**: `{self.runtime_root}`
+- **TM4 Core Path**: `{self.tm4_core_path}`
+- **Generated At**: {safe_get(sum_data.get("provenance", {}), "summary_generated_at", "unknown")}
+- **Generator Version**: {REPORT_GENERATOR_VERSION}
 """
         return body.strip() + "\n"
 
@@ -172,5 +191,16 @@ Execution record for TM4Server run `{self.exp_id}`.
         self.docs_root.mkdir(parents=True, exist_ok=True)
         content = self.generate_markdown()
         out_path = self.output_path
-        out_path.write_text(content, encoding="utf-8")
+        
+        # Atomic Write
+        tmp_path = out_path.with_suffix(".md.tmp")
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            import os
+            os.replace(tmp_path, out_path)
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+            
         return out_path
